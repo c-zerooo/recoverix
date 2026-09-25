@@ -971,6 +971,99 @@ def execute_traced_recovery(
                     )
                 )
                 total_input_bytes = len(content)
+        elif target_fmt == "json" or ext == "json":
+            # JSON is never allowed to fall through to the CSV/TXT validators
+            # below: a truncated or malformed JSON document must be reported as
+            # JSON (with honest V/R/M) rather than silently reinterpreted.
+            emit_event(
+                "RECONSTRUCTION_STARTED",
+                "Attempting deterministic JSON structural reconstruction",
+            )
+            recon_res = reconstruct_artifact("json", content)
+            emit_event(
+                "RECONSTRUCTION_COMPLETED",
+                f"JSON reconstruction completed with status '{recon_res.status}'",
+            )
+
+            ver_bytes = recon_res.verified_bytes
+            rec_byte_cnt = recon_res.reconstructed_bytes
+            miss_bytes = recon_res.missing_bytes
+            # The artifact budget is verified + reconstructed + missing (the
+            # convention enforced by tests/test_fragment_pipeline.py); the actual
+            # uploaded evidence size is preserved separately as evidence_size.
+            total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
+
+            out_bytes = recon_res.recovered_bytes
+            val_res = recon_res.validation_result or validate_artifact("json", out_bytes)
+            val_status_str = "PASSED" if val_res.valid else "FAILED"
+            val_details_dict = asdict(val_res)
+            output_dict = {"recovered_bytes": out_bytes.hex()}
+
+            eval_res = evaluate_artifact_confidence(
+                validation_result=val_res,
+                artifact=out_bytes,
+                actual_verified_bytes=ver_bytes,
+                actual_reconstructed_bytes=rec_byte_cnt,
+                actual_missing_bytes=miss_bytes,
+            )
+            score_breakdown_dict = asdict(eval_res.score_breakdown)
+            prov_dict = asdict(eval_res.provenance)
+            prov_dict["evidence_size"] = len(content)
+            prov_dict["reconstruction_method"] = recon_res.details.get(
+                "reconstruction_method", "JSON_STRUCTURAL_RECONSTRUCTION"
+            )
+            # The reconstructor holds the forensically-correct status: it knows
+            # whether bytes were structurally reconstructed or left missing, so
+            # FULLY_RECOVERED is never claimed when R>0 or M>0.
+            status_val = recon_res.status
+            fmt = "json"
+
+            fragments.append(
+                Fragment(
+                    fragment_id="frag-0",
+                    offset=0,
+                    length=len(content),
+                    end_offset=len(content),
+                    status="VERIFIED" if miss_bytes == 0 and rec_byte_cnt == 0 else "PARTIAL",
+                    source="direct_reconstruction",
+                    format="json",
+                    verified_bytes=ver_bytes,
+                    reconstructed_bytes=rec_byte_cnt,
+                    missing_bytes=miss_bytes,
+                    validation_status=val_status_str,
+                )
+            )
+
+            for idx_m, m in enumerate(recon_res.reconstruction_methods):
+                reconstruction_steps.append(
+                    ReconstructionStep(
+                        step_id=f"step-{idx_m}",
+                        method=m,
+                        input_fragment_ids=["frag-0"],
+                        gap_start=None,
+                        gap_end=None,
+                        gap_size=None,
+                        result="SUCCESS" if recon_res.success else "FAILED",
+                        verified_bytes=ver_bytes,
+                        reconstructed_bytes=rec_byte_cnt,
+                        missing_bytes=miss_bytes,
+                        validation_status=val_status_str,
+                        confidence=float(score_breakdown_dict.get("total", 0.0)),
+                    )
+                )
+
+            for idx_d, dmg in enumerate(recon_res.damage_regions):
+                damage_regions.append(
+                    DamageRegion(
+                        region_id=f"damage-{idx_d}",
+                        start_offset=dmg.get("offset", 0),
+                        end_offset=dmg.get("offset", 0) + dmg.get("length", 0),
+                        length=dmg.get("length", 0),
+                        type=dmg.get("type", "CORRUPTED"),
+                        status="RECONSTRUCTED" if recon_res.success else "UNRECOVERABLE",
+                        affected_fragment_ids=["frag-0"],
+                    )
+                )
         else:
             # Test other format validators
             matched_fmt = None
@@ -992,7 +1085,11 @@ def execute_traced_recovery(
 
                 status_val = eval_res.status.value
                 ver_bytes = len(content)
-                rec_byte_cnt = len(content)
+                # The evidence validated as-is, so nothing was reconstructed.
+                # Previously this counted every content byte as reconstructed,
+                # which broke the verified+reconstructed+missing identity and
+                # mislabelled pass-through results as full reconstruction.
+                rec_byte_cnt = 0
                 miss_bytes = 0
                 score_breakdown_dict = asdict(eval_res.score_breakdown)
                 val_details_dict = asdict(val_res)

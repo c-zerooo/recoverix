@@ -72,6 +72,7 @@ def _is_predominantly_binary_garbage(data: bytes, threshold: float = 0.60) -> bo
 
 
 from backend.app.recovery.reconstructors.txt import reconstruct_txt
+from backend.app.recovery.reconstructors.json import reconstruct_json
 
 
 def reconstruct_text(
@@ -607,6 +608,8 @@ def reconstruct_artifact(
         return reconstruct_text(data, original_data=original_data)
     elif clean_fmt == "csv":
         return reconstruct_csv(data, original_data=original_data)
+    elif clean_fmt == "json":
+        return reconstruct_json(data, original_data=original_data)
     else:
         # Unsupported format for Milestone 1
         return ReconstructionResult(
