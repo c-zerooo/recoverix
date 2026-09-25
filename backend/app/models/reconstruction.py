@@ -43,7 +43,7 @@ class BifragmentReconstructionResult:
     fragment_b_id: str
     gap_size: Optional[int]
     missing_byte_count: int
-    reconstruction_method: str = "BOUNDED_BIFRAGMENT"
+    reconstruction_method: str = "BIFRAGMENT_GAP"
     validation_result: Optional[ValidationResult] = None
     valid_candidate_count: int = 0
     fragment_a_bytes: bytes = field(default_factory=bytes)
