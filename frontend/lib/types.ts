@@ -12,16 +12,26 @@ export interface ConfidenceBreakdown {
   total: number;
 }
 
+export interface ValidationCheck {
+  name: string;
+  detail: string;
+  passed: boolean;
+}
+
 export interface ValidationResult {
   valid: boolean;
   error?: string;
+  checks?: ValidationCheck[];
 }
+
+export type FragmentType = 'VERIFIED' | 'RECONSTRUCTED_GAP' | 'MISSING';
 
 export interface Fragment {
   id: string;
   start_offset: number;
   end_offset: number;
-  source_disk: string;
+  type: FragmentType;
+  source_disk?: string;
 }
 
 export interface AIExplanation {
@@ -36,6 +46,7 @@ export interface Artifact {
   category: ArtifactCategory;
   priority: PriorityLevel;
   confidence_score: number;
+  confidence_breakdown: ConfidenceBreakdown;
   status: RecoveryStatus;
   verified_bytes: number;
   reconstructed_bytes: number;
@@ -43,6 +54,7 @@ export interface Artifact {
   reconstruction_method: ReconstructionMethod;
   validation: ValidationResult;
   fragments: Fragment[];
+  preview_text: string;
   ai_summary: AIExplanation | null;
 }
 
