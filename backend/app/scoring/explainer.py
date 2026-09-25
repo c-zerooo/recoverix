@@ -164,8 +164,8 @@ def call_llm_explanation(
     if not key:
         return None
 
-    model_name = model or os.getenv("LLM_MODEL", "gpt-4o-mini")
-    url_base = (base_url or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+    model_name = model or os.getenv("LLM_MODEL", "llama-3.2-3b-instruct")
+    url_base = (base_url or os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")).rstrip("/")
     endpoint = f"{url_base}/chat/completions"
 
     payload_facts = {

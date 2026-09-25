@@ -344,3 +344,43 @@ def test_explain_endpoint_schema_compliance():
     assert isinstance(data["details"], list)
     assert len(data["details"]) > 0
     assert all(isinstance(item, str) for item in data["details"])
+
+
+# ── 11. Local Offline LLM Configuration & Target Endpoint Test ────────────
+
+def test_local_llm_configuration_and_endpoint(monkeypatch):
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+    monkeypatch.setenv("LLM_MODEL", "llama-3.2-3b-instruct")
+    monkeypatch.setenv("LLM_API_KEY", "local")
+
+    mock_response_json = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({
+                        "summary": "Local llama.cpp summary: database log recovered.",
+                        "details": ["Verified 8400 bytes.", "Local offline LLM active."]
+                    })
+                }
+            }
+        ]
+    }
+
+    mock_client = MagicMock()
+    mock_post_res = MagicMock()
+    mock_post_res.status_code = 200
+    mock_post_res.json.return_value = mock_response_json
+    mock_client.post.return_value = mock_post_res
+
+    with patch("httpx.Client") as mock_httpx_class:
+        mock_httpx_class.return_value.__enter__.return_value = mock_client
+        res = generate_explanation(**SAMPLE_FACTS)
+
+        # Verify correct target endpoint and payload passed to local server
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
+        assert call_args[0][0] == "http://127.0.0.1:8080/v1/chat/completions"
+        assert call_args[1]["json"]["model"] == "llama-3.2-3b-instruct"
+        assert res["summary"] == "Local llama.cpp summary: database log recovered."
+
