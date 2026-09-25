@@ -51,9 +51,23 @@ export default function DashboardPage() {
       <div className="max-w-7xl mx-auto space-y-8">
         {/* Header Navigation */}
         <div>
-          <Link href="/" className="inline-flex items-center text-sm text-cyan-500 hover:text-cyan-400 mb-6">
-            <ArrowLeft className="w-4 h-4 mr-2" /> Change Evidence
-          </Link>
+          <div className="flex justify-between items-center mb-6">
+            <Link href="/" className="inline-flex items-center text-sm text-cyan-500 hover:text-cyan-400">
+              <ArrowLeft className="w-4 h-4 mr-2" /> Change Evidence
+            </Link>
+            <button 
+              onClick={() => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+                const anchor = document.createElement('a');
+                anchor.href = dataStr;
+                anchor.download = `recoverix_report_${caseData.id}.json`;
+                anchor.click();
+              }}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm px-3 py-1.5 rounded-lg border border-slate-700 transition-colors"
+            >
+              Export Case Report (JSON)
+            </button>
+          </div>
           
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
             <div>

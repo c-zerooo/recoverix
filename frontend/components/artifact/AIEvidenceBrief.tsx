@@ -12,7 +12,7 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
   const refreshBrief = async () => {
     setLoading(true);
     try {
-      const freshBrief = await fetchArtifactExplanation(artifact.id);
+      const freshBrief = await fetchArtifactExplanation(artifact.id, true);
       setBrief(freshBrief);
     } catch (err) {
       console.error("Failed to refresh AI brief", err);
@@ -29,8 +29,13 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
           <h2 className="text-xl font-semibold text-slate-100">AI Evidence Brief</h2>
         </div>
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1.5 px-2.5 py-1 bg-cyan-950/30 text-cyan-400 text-xs font-medium border border-cyan-500/20 rounded-lg">
-            <Zap className="w-3.5 h-3.5" /> Grounded in Deterministic Facts • Pre-Warmed Cache
+          <span className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border rounded-lg ${
+            brief?.cached 
+              ? 'bg-slate-900/50 text-slate-400 border-slate-700/50' 
+              : 'bg-cyan-950/30 text-cyan-400 border-cyan-500/20'
+          }`}>
+            <Zap className="w-3.5 h-3.5" /> 
+            {brief?.cached ? 'CACHED AI BRIEF' : 'REAL-TIME AI BRIEF'}
           </span>
           <button 
             onClick={refreshBrief}
@@ -38,7 +43,7 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
             className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-cyan-400' : ''}`} />
-            {loading ? 'Refreshing...' : 'Verify / Refresh'}
+            {loading ? 'Regenerating...' : 'Regenerate / Verify AI Brief'}
           </button>
         </div>
       </div>

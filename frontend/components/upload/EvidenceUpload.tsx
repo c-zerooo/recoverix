@@ -58,17 +58,20 @@ export default function EvidenceUpload() {
     let content = "";
     let filename = "";
     if (type === 'csv') {
-      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: ledger.csv\nid,amount,date,status\n1,500.00,2026-09-21,COMPLETED\n2,250.00,2026-09-22,PENDING\n[SYNTHETIC_ARTIFACT_END]";
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: fragmented_contacts.csv\nid,name,email\n1,John,john@example.com\n[SYNTHETIC_ARTIFACT_END]\n";
       filename = "fragmented.img";
     } else if (type === 'png') {
-      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: evidence_capture.png\n<PNG binary data unrenderable>\n[SYNTHETIC_ARTIFACT_END]";
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: corrupted.png\n\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRcorrupted_noise\n[SYNTHETIC_ARTIFACT_END]\n";
       filename = "corrupted.img";
     } else if (type === 'txt') {
-      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: auth_trace.txt\n2026-09-21T08:15:02Z AUTH_SUCCESS user=admin\n[SYNTHETIC_ARTIFACT_END]";
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: auth_trace.txt\n2026-09-21T08:15:02Z sudo_exec user=root ip address=192.168.1.100\n2026-09-21T08:15:05Z sudo_exec user=root ip address=192.168.1.100\n[SYNTHETIC_ARTIFACT_END]\n";
       filename = "damaged.img";
     }
     
-    const file = new File([content], filename, { type: "application/octet-stream" });
+    // Convert to uint8 array to preserve binary exactly (especially for PNG)
+    // Wait, javascript strings might mess up \\x89 for Blob. Let's use a TextEncoder.
+    const enc = new TextEncoder();
+    const file = new File([enc.encode(content)], filename, { type: "application/octet-stream" });
     executePipeline(file, `Sample Case: ${type.toUpperCase()}`);
   };
 

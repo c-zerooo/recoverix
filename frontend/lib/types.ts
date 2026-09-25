@@ -43,6 +43,7 @@ export interface Fragment {
 export interface AIExplanation {
   summary: string;
   details: string[];
+  cached?: boolean;
 }
 
 export interface Artifact {

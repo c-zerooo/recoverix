@@ -53,6 +53,47 @@ export function parseAiSummary(rawSummary: any, artifact?: any): AIExplanation |
 
 export function normalizeBackendArtifact(raw: any): Artifact {
   const isPassed = (raw.provenance?.validation_status || raw.validation_status) === 'PASSED';
+  const bd = raw.score_breakdown || raw.confidence_breakdown || {
+    header_validity: 0, footer_validity: 0, structural_validation: 0, size_plausibility: 0, reconstruction_integrity: 0, total: 0
+  };
+
+  let preview = raw.content_preview ?? raw.preview_text ?? '';
+  preview = preview.replace(/\[SYNTHETIC_ARTIFACT_START\]\n?/g, '');
+  preview = preview.replace(/\[SYNTHETIC_ARTIFACT_END\]\n?/g, '');
+  preview = preview.replace(/^filename:\s*[^\n]*\n?/g, '');
+  preview = preview.trim();
+
+  const checks = [];
+  checks.push({ name: "Header Signature Check", detail: "Start marker/magic bytes.", passed: bd.header_validity > 0 });
+  checks.push({ name: "Footer / Boundary Check", detail: "End marker/EOF.", passed: bd.footer_validity > 0 });
+  checks.push({ name: "Structural & Parser Validation", detail: "Format structure.", passed: bd.structural_validation > 0 });
+  checks.push({ name: "Defensive Bounds & Size Check", detail: "Size constraints.", passed: bd.size_plausibility > 0 });
+  
+  let reconStatus = "FAILED";
+  let reconPassed = false;
+  if (bd.reconstruction_integrity === 15) {
+    reconStatus = "Contiguous PASSED";
+    reconPassed = true;
+  } else if (bd.reconstruction_integrity > 0) {
+    reconStatus = "Bounded Gap Reconstructed";
+    reconPassed = true;
+  }
+  checks.push({ name: "Continuity / Gap Reconstruction", detail: reconStatus, passed: reconPassed });
+
+  const offset = raw.metadata?.offset || 0;
+  const vBytes = raw.provenance?.verified_bytes ?? raw.verified_bytes ?? 0;
+  const rBytes = raw.provenance?.reconstructed_bytes ?? raw.reconstructed_bytes ?? 0;
+  
+  let fragments = [];
+  if (rBytes > 0) {
+     const half = Math.floor(vBytes / 2);
+     fragments.push({ id: "frag_a", start_offset: offset, end_offset: offset + half, type: "VERIFIED" });
+     fragments.push({ id: "frag_gap", start_offset: offset + half, end_offset: offset + half + rBytes, type: "RECONSTRUCTED_GAP" });
+     fragments.push({ id: "frag_b", start_offset: offset + half + rBytes, end_offset: offset + vBytes + rBytes, type: "VERIFIED" });
+  } else {
+     fragments.push({ id: "frag_1", start_offset: offset, end_offset: offset + vBytes, type: "VERIFIED" });
+  }
+
   return {
     id: raw.artifact_id || raw.id,
     filename: raw.metadata?.filename || raw.filename || `${raw.artifact_id || 'artifact'}.${raw.format || 'bin'}`,
@@ -61,23 +102,19 @@ export function normalizeBackendArtifact(raw: any): Artifact {
     priority: raw.priority || 'LOW',
     confidence_score: raw.confidence_score ?? 0,
     status: raw.status || 'UNRECOVERABLE',
-    verified_bytes: raw.provenance?.verified_bytes ?? raw.verified_bytes ?? 0,
-    reconstructed_bytes: raw.provenance?.reconstructed_bytes ?? raw.reconstructed_bytes ?? 0,
+    verified_bytes: vBytes,
+    reconstructed_bytes: rBytes,
     missing_bytes: raw.provenance?.missing_bytes ?? raw.missing_bytes ?? 0,
     reconstruction_method: (raw.provenance?.reconstruction_method === 'BIFRAGMENT' ? 'BIFRAGMENT_GAP' : raw.provenance?.reconstruction_method) || raw.reconstruction_method || 'NONE',
     validation_status: raw.provenance?.validation_status || raw.validation_status || 'PASSED',
-    confidence_breakdown: raw.score_breakdown || raw.confidence_breakdown || {
-      header_validity: 0, footer_validity: 0, structural_validation: 0, size_plausibility: 0, reconstruction_integrity: 0, total: 0
-    },
-    preview_text: raw.content_preview ?? raw.preview_text ?? '',
+    confidence_breakdown: bd,
+    preview_text: preview,
     ai_summary: parseAiSummary(raw.ai_summary, raw) || null,
-    validation: raw.validation || {
+    validation: {
       valid: isPassed,
-      checks: [{ name: "Backend Validation", detail: `Status: ${raw.provenance?.validation_status || 'UNKNOWN'}`, passed: isPassed }]
+      checks: checks
     },
-    fragments: raw.fragments || [
-      { id: "frag_default", start_offset: raw.metadata?.offset || 0, end_offset: (raw.metadata?.offset || 0) + (raw.size_bytes || 0), type: "VERIFIED" }
-    ]
+    fragments: fragments
   } as Artifact;
 }
 
@@ -476,15 +513,27 @@ export async function fetchArtifactById(artifactId: string): Promise<Artifact> {
       console.warn("Backend unreachable, falling back to mock fetchArtifactById", e);
     }
   }
+  
+  if (typeof window !== 'undefined') {
+    const activeCaseId = localStorage.getItem('recoverix_active_case_id') || 'case_001';
+    const cachedStr = localStorage.getItem(`recoverix_artifacts_${activeCaseId}`);
+    if (cachedStr) {
+       try {
+         const cached = JSON.parse(cachedStr);
+         const found = cached.find((a: any) => a.id === artifactId);
+         if (found) return found;
+       } catch (e) {}
+    }
+  }
+
   const artifact = mockArtifacts.find(a => a.id === artifactId);
   if (!artifact) throw new Error("Artifact not found");
   return artifact;
 }
 
-export async function fetchArtifactExplanation(artifactId: string): Promise<AIExplanation> {
-  // Check cache first for instant live demo response
-  if (explanationCache.has(artifactId)) {
-    return explanationCache.get(artifactId)!;
+export async function fetchArtifactExplanation(artifactId: string, forceRefresh = false): Promise<AIExplanation> {
+  if (!forceRefresh && explanationCache.has(artifactId)) {
+    return { ...explanationCache.get(artifactId)!, cached: true };
   }
 
   let explanation: AIExplanation | null = null;
@@ -497,6 +546,10 @@ export async function fetchArtifactExplanation(artifactId: string): Promise<AIEx
       if (res.ok) {
         const rawData = await res.json();
         explanation = parseAiSummary(rawData);
+        if (explanation) {
+          // The backend json might contain 'cached'
+          explanation.cached = rawData.cached === true;
+        }
       }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock fetchArtifactExplanation", e);
@@ -506,7 +559,9 @@ export async function fetchArtifactExplanation(artifactId: string): Promise<AIEx
   if (!explanation) {
     const artifact = mockArtifacts.find(a => a.id === artifactId);
     if (!artifact || !artifact.ai_summary) throw new Error("Explanation not available");
-    explanation = artifact.ai_summary;
+    explanation = { ...artifact.ai_summary, cached: true };
+  } else if (explanation.cached === undefined) {
+    explanation.cached = false;
   }
 
   // Pre-warm/set cache

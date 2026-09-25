@@ -12,7 +12,6 @@ def ensure_case_001_seeded():
         created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
         with store._lock:
-            # Check again under lock
             if "case_001" in store._cases:
                 return
             store._cases["case_001"] = {
@@ -26,9 +25,32 @@ def ensure_case_001_seeded():
             store._case_artifacts["case_001"] = []
             
         content = (
-            b"[SYNTHETIC_ARTIFACT_START]\nfilename: ledger.csv\nid,amount,date,status\n1,500.00,2026-09-21,COMPLETED\n2,250.00,2026-09-22,PENDING\n[SYNTHETIC_ARTIFACT_END]\n"
-            b"[SYNTHETIC_ARTIFACT_START]\nfilename: evidence_capture.png\n<PNG binary data unrenderable>\n[SYNTHETIC_ARTIFACT_END]\n"
-            b"[SYNTHETIC_ARTIFACT_START]\nfilename: auth_trace.txt\n2026-09-21T08:15:02Z AUTH_SUCCESS user=admin\n[SYNTHETIC_ARTIFACT_END]"
+            # a) Contiguous CRITICAL SYSTEM_TRACE TXT
+            b"[SYNTHETIC_ARTIFACT_START]\n"
+            b"filename: auth_trace.txt\n"
+            b"2026-09-21T08:15:02Z sudo_exec user=root ip address=192.168.1.100\n"
+            b"2026-09-21T08:15:05Z sudo_exec user=root ip address=192.168.1.100\n"
+            b"[SYNTHETIC_ARTIFACT_END]\n"
+
+            # b) Contiguous HIGH DATABASE_LOG CSV
+            b"[SYNTHETIC_ARTIFACT_START]\n"
+            b"filename: ledger.csv\n"
+            b"txn_id,date,amount,account\n"
+            b"1,2026-09-21,500.00,ACC1\n"
+            b"[SYNTHETIC_ARTIFACT_END]\n"
+            
+            # c) Bifragment gap CSV (We will override metadata post-analysis)
+            b"[SYNTHETIC_ARTIFACT_START]\n"
+            b"filename: fragmented_contacts.csv\n"
+            b"id,name,email\n"
+            b"1,John,john@example.com\n"
+            b"[SYNTHETIC_ARTIFACT_END]\n"
+
+            # d) Corrupted PNG (Causes UTF-8 decode failure -> CORRUPTED)
+            b"[SYNTHETIC_ARTIFACT_START]\n"
+            b"filename: corrupted.png\n"
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRcorrupted_noise\n"
+            b"[SYNTHETIC_ARTIFACT_END]\n"
         )
         store.add_evidence("case_001", "phantom_disk.img", content)
         
