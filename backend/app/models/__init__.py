@@ -12,6 +12,16 @@ from backend.app.models.confidence import (
     ArtifactProvenance,
     ConfidenceEvaluationResult,
 )
+from backend.app.models.case import (
+    CaseCreate,
+    EvidenceMetadata,
+    CaseResponse,
+)
+from backend.app.models.artifact import (
+    ConfidenceBreakdownSchema,
+    ArtifactProvenanceSchema,
+    ArtifactResponse,
+)
 
 __all__ = [
     "ValidationResult",
@@ -20,4 +30,10 @@ __all__ = [
     "ConfidenceBreakdown",
     "ArtifactProvenance",
     "ConfidenceEvaluationResult",
+    "CaseCreate",
+    "EvidenceMetadata",
+    "CaseResponse",
+    "ConfidenceBreakdownSchema",
+    "ArtifactProvenanceSchema",
+    "ArtifactResponse",
 ]
