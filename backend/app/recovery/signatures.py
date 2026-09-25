@@ -2,16 +2,15 @@
 signatures.py — Controlled format-signature registry.
 
 Defines the signature patterns the scanner uses to identify candidate
-artifact regions in raw evidence bytes.  Supports ONLY the formats
-required by the current prototype:
+artifact regions in raw evidence bytes across the 7 supported formats:
 
-  - TXT  (synthetic boundary markers)
-  - CSV  (synthetic boundary markers)
-  - PNG  (standard PNG magic bytes)
-
-TXT and CSV both use the same [SYNTHETIC_ARTIFACT_START] /
-[SYNTHETIC_ARTIFACT_END] markers from the test-harness generator.
-They are distinguished by content heuristics after detection.
+  - TXT  (synthetic boundary markers or plain UTF-8 text)
+  - CSV  (synthetic boundary markers or CSV structure)
+  - JSON (JSON header '{' / '[' or synthetic boundary markers)
+  - XML  (XML header '<?xml' / '<' or synthetic boundary markers)
+  - PNG  (standard PNG magic bytes 0x89 50 4E 47 0D 0A 1A 0A)
+  - JPEG (ISO/IEC 10918-1 SOI marker 0xFF 0xD8)
+  - PDF  (standard PDF magic header '%PDF-')
 
 This module does NOT perform recovery, carving, reconstruction,
 classification, or AI work.
@@ -23,16 +22,25 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
-# ── Synthetic boundary markers (shared by TXT and CSV) ──────────────
-# These match the markers used in backend/generate_case.py.
+# ── Synthetic boundary markers (shared by test harness) ──────────────
 
 SYNTHETIC_START_MARKER: bytes = b"[SYNTHETIC_ARTIFACT_START]"
 SYNTHETIC_END_MARKER: bytes = b"[SYNTHETIC_ARTIFACT_END]"
 
-# ── PNG magic bytes ─────────────────────────────────────────────────
-# Standard 8-byte PNG file signature (RFC 2083).
+# ── Image magic signatures ─────────────────────────────────────────
 
 PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
+JPEG_SOI: bytes = b"\xff\xd8"
+JPEG_EOI: bytes = b"\xff\xd9"
+
+# ── Document magic signatures ─────────────────────────────────────
+
+PDF_HEADER_SIGNATURE: bytes = b"%PDF-"
+PDF_TRAILER_SIGNATURE: bytes = b"%%EOF"
+
+# ── Structured text signatures ─────────────────────────────────────
+
+XML_HEADER_SIGNATURE: bytes = b"<?xml"
 
 
 @dataclass(frozen=True)
@@ -40,9 +48,9 @@ class FormatSignature:
     """Describes how the scanner identifies one artifact format.
 
     Attributes:
-        format: Short format identifier (e.g. ``"txt"``, ``"csv"``, ``"png"``).
+        format: Short format identifier (e.g. ``"txt"``, ``"csv"``, ``"png"``, ``"jpeg"``, ``"json"``, ``"xml"``, ``"pdf"``).
         mime_type: MIME type string.
-        category: Human-readable category (e.g. ``"text"``, ``"image"``).
+        category: Human-readable category (e.g. ``"text"``, ``"image"``, ``"structured"``, ``"document"``).
         header: Byte pattern that marks the start of the artifact.
         footer: Optional byte pattern that marks the end.  ``None`` means
                 the end cannot be determined from a trailer alone.
@@ -58,7 +66,6 @@ class FormatSignature:
 
 
 # ── Registry ────────────────────────────────────────────────────────
-# Explicit list — kept small on purpose.  The scanner iterates this.
 
 SIGNATURES: List[FormatSignature] = [
     FormatSignature(
@@ -78,11 +85,43 @@ SIGNATURES: List[FormatSignature] = [
         detection_method="synthetic_boundary",
     ),
     FormatSignature(
+        format="json",
+        mime_type="application/json",
+        category="structured",
+        header=b"{",
+        footer=b"}",
+        detection_method="syntax_boundary",
+    ),
+    FormatSignature(
+        format="xml",
+        mime_type="application/xml",
+        category="structured",
+        header=XML_HEADER_SIGNATURE,
+        footer=b">",
+        detection_method="magic_bytes",
+    ),
+    FormatSignature(
         format="png",
         mime_type="image/png",
         category="image",
         header=PNG_SIGNATURE,
-        footer=None,
+        footer=b"IEND\xaeB`\x82",
+        detection_method="magic_bytes",
+    ),
+    FormatSignature(
+        format="jpeg",
+        mime_type="image/jpeg",
+        category="image",
+        header=JPEG_SOI,
+        footer=JPEG_EOI,
+        detection_method="magic_bytes",
+    ),
+    FormatSignature(
+        format="pdf",
+        mime_type="application/pdf",
+        category="document",
+        header=PDF_HEADER_SIGNATURE,
+        footer=PDF_TRAILER_SIGNATURE,
         detection_method="magic_bytes",
     ),
 ]

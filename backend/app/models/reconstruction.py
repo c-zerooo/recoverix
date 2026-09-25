@@ -13,7 +13,7 @@ Forensic Invariant:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from backend.app.models.validation import ValidationResult
 
@@ -49,3 +49,37 @@ class BifragmentReconstructionResult:
     fragment_a_bytes: bytes = field(default_factory=bytes)
     fragment_b_bytes: bytes = field(default_factory=bytes)
     missing_region_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ReconstructionResult:
+    """Forensic result of format-specific deterministic reconstruction.
+
+    Attributes:
+        format: Format identifier ("txt", "csv", "json", "xml", "png", "jpeg", "pdf").
+        status: High-level recovery status ("FULLY_RECOVERED", "PARTIALLY_RECOVERED", "UNRECOVERABLE").
+        success: Whether a structurally valid output file was produced.
+        recovered_bytes: Raw usable reconstructed file bytes (never synthetic filler).
+        verified_bytes: Count of bytes in recovered_bytes that came directly from evidence.
+        reconstructed_bytes: Count of deterministic structural repair bytes added to achieve validity.
+        missing_bytes: Count of evidence bytes lost or destroyed that remain unrecoverable.
+        damage_regions: List of detected damage regions (offsets, length, type, status).
+        reconstruction_methods: List of deterministic techniques applied.
+        validation_result: Structural validation result for recovered_bytes.
+        is_exact_match: Optional boolean indicating SHA-256 equality with ground truth.
+        details: Additional forensic diagnostics and metadata.
+    """
+
+    format: str
+    status: str
+    success: bool
+    recovered_bytes: bytes
+    verified_bytes: int
+    reconstructed_bytes: int
+    missing_bytes: int
+    damage_regions: List[Dict[str, Any]] = field(default_factory=list)
+    reconstruction_methods: List[str] = field(default_factory=list)
+    validation_result: Optional[ValidationResult] = None
+    is_exact_match: Optional[bool] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+

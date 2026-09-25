@@ -1,14 +1,13 @@
 """
-csv.py — Deterministic CSV artifact structural validator.
+json.py — Deterministic JSON artifact structural validator.
 
-Validates recovered CSV artifact bytes against synthetic harness boundaries (if present)
-or direct CSV content, UTF-8 encoding, Python csv module parsing rules, and row structural consistency.
+Validates recovered JSON artifact bytes against synthetic harness boundaries (if present)
+or direct JSON syntax, UTF-8 encoding, and json module parsing rules.
 """
 
 from __future__ import annotations
 
-import csv
-import io
+import json
 from typing import Union, Any
 
 from backend.app.models.validation import ValidationResult
@@ -19,18 +18,18 @@ from backend.app.recovery.signatures import (
 )
 
 
-def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
-    """Validate the structural integrity of a recovered CSV artifact.
+def validate_json(data: bytes | RecoveredArtifact) -> ValidationResult:
+    """Validate the structural integrity of a recovered JSON artifact.
 
     Accepts raw bytes or a RecoveredArtifact object.
 
     Checks performed:
-      1. input_type: input is bytes (or RecoveredArtifact yielding bytes)
+      1. input_type: input is bytes or RecoveredArtifact yielding bytes
       2. non_empty: input is non-empty
       3. synthetic markers check (if present: start_marker_exists, end_marker_exists, marker_ordering)
       4. utf8_decoding: payload can be safely decoded as UTF-8
-      5. csv_parsing: body parses successfully with csv.reader
-      6. row_consistency: all non-empty rows have a consistent column count
+      5. json_parsing: text parses successfully with json.loads
+      6. root_structure: checks object or array root structure
 
     Args:
         data: Raw evidence bytes or RecoveredArtifact.
@@ -42,15 +41,15 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
         "input_type",
         "non_empty",
         "utf8_decoding",
-        "csv_parsing",
-        "row_consistency",
+        "json_parsing",
+        "root_structure",
     ]
     errors: list[str] = []
     warnings: list[str] = []
     details: dict[str, Any] = {}
 
     raw_bytes: bytes
-    fmt: str = "csv"
+    fmt: str = "json"
     if isinstance(data, RecoveredArtifact):
         raw_bytes = data.recovered_bytes
         if data.format:
@@ -75,12 +74,11 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
             errors=errors,
         )
 
-    # Check for synthetic markers
+    # Check for synthetic markers if present
     start_pos = raw_bytes.find(SYNTHETIC_START_MARKER)
     end_pos = raw_bytes.find(SYNTHETIC_END_MARKER)
 
     body_bytes = raw_bytes
-
     if start_pos != -1 or end_pos != -1:
         checks.extend(["start_marker_exists", "end_marker_exists", "marker_ordering"])
         if start_pos == -1:
@@ -97,9 +95,9 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
                 body_start = start_pos + len(SYNTHETIC_START_MARKER)
                 body_bytes = raw_bytes[body_start:end_pos]
 
-    # UTF-8 decoding check
+    # 4. UTF-8 decoding check
     try:
-        body_text = body_bytes.decode("utf-8")
+        text = body_bytes.decode("utf-8")
     except UnicodeDecodeError as e:
         errors.append(f"UTF-8 decoding failed: {e}")
         return ValidationResult(
@@ -111,38 +109,33 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
             details=details,
         )
 
-    # CSV parsing check with delimiter detection fallback
+    stripped_text = text.strip()
+    if not stripped_text:
+        errors.append("JSON payload text is empty after trimming whitespace")
+        return ValidationResult(
+            valid=False,
+            format=fmt,
+            checks_performed=checks,
+            errors=errors,
+            warnings=warnings,
+            details=details,
+        )
+
+    # 5. JSON parsing check
     try:
-        f = io.StringIO(body_text)
-        # Attempt standard comma delimiter first
-        reader = csv.reader(f)
-        rows = [row for row in reader if any(field.strip() for field in row)]
-
-        # If comma yields single column rows, try alternative delimiters (;, \t, |)
-        if rows and all(len(r) == 1 for r in rows):
-            for delim in [";", "\t", "|"]:
-                f.seek(0)
-                alt_reader = csv.reader(f, delimiter=delim)
-                alt_rows = [row for row in alt_reader if any(field.strip() for field in row)]
-                if alt_rows and any(len(r) > 1 for r in alt_rows):
-                    rows = alt_rows
-                    details["delimiter"] = delim
-                    break
-
-        details["row_count"] = len(rows)
-
-        if len(rows) == 0:
-            errors.append("CSV body contains no data rows")
+        parsed = json.loads(stripped_text)
+        details["root_type"] = type(parsed).__name__
+        if isinstance(parsed, dict):
+            details["key_count"] = len(parsed)
+            details["root_keys"] = list(parsed.keys())[:10]
+        elif isinstance(parsed, list):
+            details["item_count"] = len(parsed)
         else:
-            col_counts = [len(row) for row in rows]
-            details["column_counts"] = col_counts
-            first_count = col_counts[0]
-            if any(c != first_count for c in col_counts):
-                errors.append(f"Inconsistent row structure: column counts vary across rows ({col_counts})")
-    except csv.Error as e:
-        errors.append(f"CSV parsing failed: {e}")
+            warnings.append(f"JSON root element is primitive ({type(parsed).__name__}), expected object or array")
+    except json.JSONDecodeError as e:
+        errors.append(f"JSON parsing failed at line {e.lineno}, col {e.colno}: {e.msg}")
     except Exception as e:
-        errors.append(f"Unexpected error during CSV parsing: {e}")
+        errors.append(f"Unexpected error during JSON parsing: {e}")
 
     valid = len(errors) == 0
     return ValidationResult(

@@ -339,6 +339,7 @@ def execute_traced_recovery(
                 ver_bytes = eval_res.provenance.verified_bytes
                 rec_byte_cnt = eval_res.provenance.reconstructed_bytes
                 miss_bytes = eval_res.provenance.missing_bytes
+
                 score_breakdown_dict = asdict(eval_res.score_breakdown)
                 val_details_dict = asdict(val_res_for_eval)
                 prov_dict = asdict(eval_res.provenance)
@@ -493,15 +494,36 @@ def execute_traced_recovery(
                             carving_method="XREF_RECONSTRUCTED",
                         )
                         val_res = validator(carved_rebuilt)
-                        eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=carved_rebuilt)
+                        # Accounted input is the surviving evidence actually uploaded
+                        # (raw_bytes). Bytes the deterministic xref rebuild added on top
+                        # of that evidence are reconstructed, never verified. Evidence
+                        # bytes not carried into the output are reported missing, so
+                        # verified + reconstructed + missing == total_input always.
+                        pdf_input_bytes = len(raw_bytes)
+                        pdf_reconstructed_bytes = max(0, len(rebuilt_bytes) - pdf_input_bytes)
+                        pdf_missing_bytes = max(0, pdf_input_bytes - len(rebuilt_bytes))
+                        pdf_verified_bytes = pdf_input_bytes - pdf_missing_bytes
+                        eval_res = evaluate_artifact_confidence(
+                            validation_result=val_res,
+                            artifact=carved_rebuilt,
+                            actual_verified_bytes=pdf_verified_bytes,
+                            actual_reconstructed_bytes=pdf_reconstructed_bytes,
+                            actual_missing_bytes=pdf_missing_bytes,
+                        )
 
                         status_val = eval_res.status.value
                         ver_bytes = eval_res.provenance.verified_bytes
                         rec_byte_cnt = eval_res.provenance.reconstructed_bytes
                         miss_bytes = eval_res.provenance.missing_bytes
+                        # total_input_bytes is the artifact budget (the convention
+                        # enforced by tests/test_fragment_pipeline.py), so it must
+                        # equal verified + reconstructed + missing. The uploaded
+                        # evidence size is preserved separately as evidence_size.
+                        total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
                         score_breakdown_dict = asdict(eval_res.score_breakdown)
                         val_details_dict = asdict(val_res)
                         prov_dict = asdict(eval_res.provenance)
+                        prov_dict["evidence_size"] = len(content)
                         output_dict = {"recovered_bytes": rebuilt_bytes.hex()}
 
                         step0 = ReconstructionStep(
@@ -663,7 +685,8 @@ def execute_traced_recovery(
                 emit_event(
                     "RECONSTRUCTION_COMPLETED",
                     f"{target_fmt.upper()} fragment reconstruction status "
-                    f"'{recon_res.status}': {recon_res.details['notice']}",
+                    f"'{recon_res.status}': "
+                    f"{recon_res.details.get('notice') or recon_res.details.get('reason') or recon_res.details.get('error') or 'no detail provided'}",
                     relevant_fragment_ids=[rel.fragment_a_id, rel.fragment_b_id],
                 )
 

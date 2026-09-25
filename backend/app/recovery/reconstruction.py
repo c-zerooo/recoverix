@@ -775,6 +775,14 @@ def reconstruct_fragment_pair(
                     res_a.recovered_bytes + res_b.recovered_bytes
                 ).hexdigest(),
                 "note": search.missing_region_metadata.get("note"),
+                "notice": (
+                    f"No candidate gap size in [{min_gap}, {max_gap}] satisfied "
+                    f"{clean_fmt.upper()} structural validation "
+                    f"({search.missing_region_metadata.get('note')}). The surviving "
+                    "fragment bytes are preserved and the intervening region is "
+                    "reported as still missing. No gap bytes were synthesized, "
+                    "padded, or emitted."
+                ),
             },
         )
         # intra_missing is already contained in fragment_bytes, so the artifact

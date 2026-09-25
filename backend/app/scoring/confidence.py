@@ -166,15 +166,14 @@ def classify_recovery_status(
     """Classify recovery status based on confidence score and critical override rules.
 
     Thresholds:
-      - 85–100 → FULLY_RECOVERED (Unless reconstructed_bytes > 0)
+      - 85–100 → FULLY_RECOVERED (Unless reconstructed_bytes > 0 or missing_bytes > 0)
       - 50–84  → PARTIALLY_RECOVERED
       - 20–49  → CORRUPTED
       - 0–19   → UNRECOVERABLE
 
     Critical Override Rule:
-      If reconstructed_bytes > 0 and the numeric threshold result is FULLY_RECOVERED,
-      it is strictly downgraded to PARTIALLY_RECOVERED.
-      Otherwise, the numeric threshold result is preserved.
+      If reconstructed_bytes > 0 or missing_bytes > 0 and numeric threshold result is FULLY_RECOVERED,
+      it is strictly downgraded to PARTIALLY_RECOVERED. Otherwise, numeric threshold result is preserved.
 
     Args:
         score: Numeric confidence score (0–100).
@@ -202,7 +201,7 @@ def classify_recovery_status(
     else:
         status = RecoveryStatus.UNRECOVERABLE
 
-    if reconstructed_bytes > 0 and status == RecoveryStatus.FULLY_RECOVERED:
+    if (reconstructed_bytes > 0 or missing_bytes > 0) and status == RecoveryStatus.FULLY_RECOVERED:
         return RecoveryStatus.PARTIALLY_RECOVERED
 
     return status
@@ -212,6 +211,9 @@ def build_provenance(
     validation_result: ValidationResult,
     reconstruction_result: Optional[BifragmentReconstructionResult] = None,
     artifact: Optional[Union[RecoveredArtifact, bytes, bytearray]] = None,
+    actual_missing_bytes: Optional[int] = None,
+    actual_verified_bytes: Optional[int] = None,
+    actual_reconstructed_bytes: Optional[int] = None,
 ) -> ArtifactProvenance:
     """Build lightweight forensic provenance metadata for a recovered artifact.
 
@@ -219,6 +221,12 @@ def build_provenance(
         validation_result: ValidationResult from Task 5.
         reconstruction_result: BifragmentReconstructionResult from Task 6 (optional).
         artifact: Recovered artifact bytes or object (optional).
+        actual_missing_bytes: Optional explicit count of missing bytes in physical evidence.
+        actual_verified_bytes: Optional explicit count of surviving input evidence bytes.
+            Use when the artifact output is larger than the input evidence (e.g. a
+            deterministic rebuild), so verified bytes are not inflated to the output size.
+        actual_reconstructed_bytes: Optional explicit count of deterministically
+            reconstructed bytes that were added to the surviving evidence.
 
     Returns:
         ArtifactProvenance metadata structure.
@@ -231,7 +239,10 @@ def build_provenance(
     if reconstruction_result is not None and isinstance(reconstruction_result, BifragmentReconstructionResult):
         verified_bytes = len(reconstruction_result.fragment_a_bytes) + len(reconstruction_result.fragment_b_bytes)
         reconstructed_bytes = 0  # Missing gap bytes are NEVER synthesized as recovered evidence
-        missing_bytes = reconstruction_result.missing_byte_count if reconstruction_result.success else 0
+        if actual_missing_bytes is not None:
+            missing_bytes = actual_missing_bytes
+        else:
+            missing_bytes = reconstruction_result.missing_byte_count if reconstruction_result.success else 0
         reconstruction_method = reconstruction_result.reconstruction_method
     elif artifact is not None:
         if isinstance(artifact, RecoveredArtifact):
@@ -239,11 +250,18 @@ def build_provenance(
         elif isinstance(artifact, (bytes, bytearray)):
             verified_bytes = len(artifact)
         reconstructed_bytes = 0
-        missing_bytes = 0
+        missing_bytes = actual_missing_bytes if actual_missing_bytes is not None else 0
         reconstruction_method = "NONE"
     elif validation_result is not None and hasattr(validation_result, "details"):
         # Extract from validation details if provided
         verified_bytes = validation_result.details.get("byte_count", 0)
+        missing_bytes = actual_missing_bytes if actual_missing_bytes is not None else 0
+
+    if actual_verified_bytes is not None:
+        verified_bytes = actual_verified_bytes
+
+    if actual_reconstructed_bytes is not None:
+        reconstructed_bytes = actual_reconstructed_bytes
 
     val_status = "PASSED" if (validation_result and validation_result.valid) else "FAILED"
 
@@ -260,6 +278,9 @@ def evaluate_artifact_confidence(
     validation_result: ValidationResult,
     reconstruction_result: Optional[BifragmentReconstructionResult] = None,
     artifact: Optional[Union[RecoveredArtifact, bytes, bytearray]] = None,
+    actual_missing_bytes: Optional[int] = None,
+    actual_verified_bytes: Optional[int] = None,
+    actual_reconstructed_bytes: Optional[int] = None,
 ) -> ConfidenceEvaluationResult:
     """Evaluate confidence breakdown, status classification, and provenance for an artifact.
 
@@ -267,11 +288,22 @@ def evaluate_artifact_confidence(
         validation_result: ValidationResult from Task 5.
         reconstruction_result: BifragmentReconstructionResult from Task 6 (optional).
         artifact: Recovered artifact bytes or object (optional).
+        actual_missing_bytes: Optional explicit count of missing bytes in physical evidence.
+        actual_verified_bytes: Optional explicit count of surviving input evidence bytes.
+        actual_reconstructed_bytes: Optional explicit count of deterministically
+            reconstructed bytes added to the surviving evidence.
 
     Returns:
         ConfidenceEvaluationResult combining breakdown, status, and provenance.
     """
-    provenance = build_provenance(validation_result, reconstruction_result, artifact)
+    provenance = build_provenance(
+        validation_result,
+        reconstruction_result,
+        artifact,
+        actual_missing_bytes=actual_missing_bytes,
+        actual_verified_bytes=actual_verified_bytes,
+        actual_reconstructed_bytes=actual_reconstructed_bytes,
+    )
     breakdown = calculate_confidence(validation_result, reconstruction_result, artifact)
     status = classify_recovery_status(
         score=breakdown.total,

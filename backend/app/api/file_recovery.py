@@ -1,0 +1,158 @@
+"""
+file_recovery.py — Single-file forensic recovery API router for Recoverix.
+
+Enables uploading a single corrupted or supported file, executing deterministic
+carving, validation, and scoring across 6 supported formats (TXT, CSV, JSON, XML, PNG, JPEG),
+and producing downloadable recovered byte buffers.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Dict, Any, Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Response
+from pydantic import BaseModel
+
+from backend.app.store import store, MAX_EVIDENCE_SIZE
+from backend.app.recovery.scanner import scan_evidence, Candidate
+from backend.app.recovery.carver import carve_candidate, RecoveredArtifact
+from backend.app.recovery.validators import validate_artifact, VALIDATORS
+from backend.app.recovery.bifragment import reconstruct_bifragment
+from backend.app.scoring.confidence import evaluate_artifact_confidence
+from backend.app.recovery.tracer import execute_traced_recovery
+
+
+class FileRecoveryResponse(BaseModel):
+    """Structured response model for single-file recovery."""
+
+    file_id: str
+    run_id: Optional[str] = None
+    original_filename: str
+    recovered_filename: str
+    format: str
+    status: str
+    confidence_score: float
+    verified_bytes: int
+    reconstructed_bytes: int
+    missing_bytes: int
+    reconstruction_method: str
+    validation_status: str
+    is_downloadable: bool
+    download_url: str
+    content_preview: Optional[str] = None
+    score_breakdown: Dict[str, float]
+    validation_details: Dict[str, Any]
+
+
+router = APIRouter(tags=["file_recovery"])
+
+
+@router.post("/recover-file", response_model=FileRecoveryResponse, status_code=status.HTTP_200_OK)
+@router.post("/recover/file", response_model=FileRecoveryResponse, status_code=status.HTTP_200_OK)
+async def recover_single_file(file: UploadFile = File(...)) -> FileRecoveryResponse:
+    """Upload a single evidence file for deterministic byte recovery and validation."""
+    content = await file.read()
+
+    if len(content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="EMPTY_FILE",
+        )
+
+    if len(content) > MAX_EVIDENCE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FILE_TOO_LARGE",
+        )
+
+    orig_filename = file.filename or "uploaded_file.bin"
+    file_id = f"rec_file_{uuid.uuid4().hex[:8]}"
+
+    # Execute and trace recovery
+    recovery_run = execute_traced_recovery(
+        filename=orig_filename,
+        content=content,
+        artifact_id=file_id,
+    )
+
+    # Extract results from trace
+    metadict = store.get_recovered_file_metadata(file_id)
+    # Re-map from recovery_run
+    fmt = recovery_run.format
+    status_val = recovery_run.status
+    conf_score = float(recovery_run.confidence.get("total", 0.0))
+    ver_bytes = recovery_run.total_verified_bytes
+    rec_byte_cnt = recovery_run.total_reconstructed_bytes
+    miss_bytes = recovery_run.total_missing_bytes
+    method = recovery_run.reconstruction_steps[0].method if recovery_run.reconstruction_steps else "NONE"
+
+    # Fallback to existing logic for mapping remaining fields to keep response model happy
+    # Note: Much of this was previously computed directly in the tracer or duplicated.
+    # We should trust recovery_run more, but to minimize scope change while adding tracing:
+
+    # ... mapping logic ...
+
+    rec_filename = f"recovered_{orig_filename}"
+    val_status = "PASSED" if recovery_run.status != "UNRECOVERABLE" else "FAILED"
+
+    # Keep response matching
+    score_breakdown = recovery_run.confidence
+    val_details = recovery_run.validation
+
+    is_downloadable = len(recovery_run.output.get("recovered_bytes", "").encode()) > 0 if recovery_run.output else False
+    download_url = f"/api/recover-file/{file_id}/download"
+
+    content_preview = None
+    if recovery_run.output:
+        hex_str = recovery_run.output.get("recovered_bytes", "")
+        if hex_str:
+            try:
+                raw_b = bytes.fromhex(hex_str)
+                content_preview = raw_b.decode("utf-8", errors="replace")[:300]
+            except Exception:
+                content_preview = hex_str[:300]
+
+    meta_dict = {
+        "file_id": file_id,
+        "run_id": recovery_run.run_id,
+        "original_filename": orig_filename,
+        "recovered_filename": rec_filename,
+        "format": fmt,
+        "status": status_val,
+        "confidence_score": conf_score,
+        "verified_bytes": ver_bytes,
+        "reconstructed_bytes": rec_byte_cnt,
+        "missing_bytes": miss_bytes,
+        "reconstruction_method": method,
+        "validation_status": val_status,
+        "is_downloadable": is_downloadable,
+        "download_url": download_url,
+        "content_preview": content_preview,
+        "score_breakdown": score_breakdown,
+        "validation_details": val_details,
+    }
+
+    store.store_recovered_file(file_id, meta_dict, (bytes.fromhex(recovery_run.output.get("recovered_bytes", "")) if recovery_run.output else b""))
+
+    return FileRecoveryResponse(**meta_dict)
+
+
+@router.get("/recover-file/{file_id}/download", status_code=status.HTTP_200_OK)
+@router.get("/recover/file/{file_id}/download", status_code=status.HTTP_200_OK)
+def download_recovered_file(file_id: str) -> Response:
+    """Download raw byte buffer of a recovered single file."""
+    meta = store.get_recovered_file_metadata(file_id)
+    content = store.get_recovered_file_bytes(file_id)
+
+    if meta is None or content is None or not meta.get("is_downloadable", False):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recovered file '{file_id}' not found or unrecoverable",
+        )
+
+    rec_name = meta.get("recovered_filename", "recovered_file.bin")
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{rec_name}"'},
+    )

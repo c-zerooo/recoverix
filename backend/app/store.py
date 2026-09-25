@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from backend.app.models.case import CaseResponse, EvidenceMetadata
 from backend.app.models.artifact import ArtifactResponse
+from backend.app.models.recovery_run import RecoveryRun
 from backend.app.ingestion import compute_metadata, chunk_evidence, Chunk
 
 MAX_EVIDENCE_SIZE = 5 * 1024 * 1024  # 5 MiB limit
@@ -26,6 +27,11 @@ class InMemoryStore:
         self._chunks: Dict[str, List[Chunk]] = {}
         self._artifacts: Dict[str, ArtifactResponse] = {}
         self._case_artifacts: Dict[str, List[str]] = {}
+        self._recovered_files: Dict[str, dict] = {}
+        self._recovered_bytes: Dict[str, bytes] = {}
+        self._artifact_bytes: Dict[str, bytes] = {}
+        self._recovery_runs: Dict[str, RecoveryRun] = {}
+        self._artifact_runs: Dict[str, str] = {}
 
     def clear(self) -> None:
         """Clear all stored state (for test isolation)."""
@@ -35,6 +41,11 @@ class InMemoryStore:
             self._chunks.clear()
             self._artifacts.clear()
             self._case_artifacts.clear()
+            self._recovered_files.clear()
+            self._recovered_bytes.clear()
+            self._artifact_bytes.clear()
+            self._recovery_runs.clear()
+            self._artifact_runs.clear()
 
     def create_case(self, name: str, description: Optional[str] = None) -> CaseResponse:
         """Create and store a new forensic case.
@@ -157,6 +168,59 @@ class InMemoryStore:
                 return None
             art_ids = self._case_artifacts.get(case_id, [])
             return [self._artifacts[aid] for aid in art_ids if aid in self._artifacts]
+
+    def store_recovered_file(self, file_id: str, metadata: dict, content: bytes) -> dict:
+        """Store single recovered file metadata and raw bytes."""
+        with self._lock:
+            self._recovered_files[file_id] = metadata
+            self._recovered_bytes[file_id] = content
+            return metadata
+
+    def get_recovered_file_metadata(self, file_id: str) -> Optional[dict]:
+        """Get single recovered file metadata by file_id."""
+        with self._lock:
+            return self._recovered_files.get(file_id)
+
+    def get_recovered_file_bytes(self, file_id: str) -> Optional[bytes]:
+        """Get raw bytes of a single recovered file by file_id."""
+        with self._lock:
+            return self._recovered_bytes.get(file_id)
+
+    def store_artifact_bytes(self, artifact_id: str, content: bytes) -> None:
+        """Store raw bytes of a recovered case artifact."""
+        with self._lock:
+            self._artifact_bytes[artifact_id] = content
+
+    def get_artifact_bytes(self, artifact_id: str) -> Optional[bytes]:
+        """Get raw bytes of a recovered case artifact by artifact_id."""
+        with self._lock:
+            return self._artifact_bytes.get(artifact_id)
+
+    def add_recovery_run(self, run: RecoveryRun) -> RecoveryRun:
+        """Store a RecoveryRun model in memory."""
+        with self._lock:
+            self._recovery_runs[run.run_id] = run
+            if run.artifact_id:
+                self._artifact_runs[run.artifact_id] = run.run_id
+            return run
+
+    def get_recovery_run(self, run_id: str) -> Optional[RecoveryRun]:
+        """Retrieve RecoveryRun by run_id."""
+        with self._lock:
+            return self._recovery_runs.get(run_id)
+
+    def list_recovery_runs(self) -> List[RecoveryRun]:
+        """List all stored RecoveryRun models."""
+        with self._lock:
+            return list(self._recovery_runs.values())
+
+    def get_recovery_run_by_artifact(self, artifact_id: str) -> Optional[RecoveryRun]:
+        """Retrieve RecoveryRun associated with an artifact_id."""
+        with self._lock:
+            run_id = self._artifact_runs.get(artifact_id)
+            if run_id:
+                return self._recovery_runs.get(run_id)
+            return None
 
 
 # Global store instance

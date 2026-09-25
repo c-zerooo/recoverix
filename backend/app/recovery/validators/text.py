@@ -1,8 +1,8 @@
 """
 text.py — Deterministic TXT artifact structural validator.
 
-Validates recovered TXT artifact bytes against synthetic harness boundaries
-and UTF-8 encoding requirements.
+Validates recovered TXT artifact bytes against synthetic harness boundaries (if present)
+or plain UTF-8 encoding requirements.
 """
 
 from __future__ import annotations
@@ -25,10 +25,8 @@ def validate_txt(data: bytes | RecoveredArtifact) -> ValidationResult:
     Checks performed:
       1. input_type: input is bytes (or RecoveredArtifact yielding bytes)
       2. non_empty: input is non-empty
-      3. start_marker_exists: SYNTHETIC_START_MARKER is present
-      4. end_marker_exists: SYNTHETIC_END_MARKER is present
-      5. marker_ordering: start marker occurs before end marker
-      6. utf8_decoding: payload can be safely decoded as UTF-8
+      3. synthetic markers check (if present: start_marker_exists, end_marker_exists, marker_ordering)
+      4. utf8_decoding: payload can be safely decoded as UTF-8
 
     Args:
         data: Raw evidence bytes or RecoveredArtifact.
@@ -39,9 +37,6 @@ def validate_txt(data: bytes | RecoveredArtifact) -> ValidationResult:
     checks: list[str] = [
         "input_type",
         "non_empty",
-        "start_marker_exists",
-        "end_marker_exists",
-        "marker_ordering",
         "utf8_decoding",
     ]
     errors: list[str] = []
@@ -75,28 +70,37 @@ def validate_txt(data: bytes | RecoveredArtifact) -> ValidationResult:
             errors=errors,
         )
 
-    # 2. Start marker check
+    # Check for synthetic markers
     start_pos = raw_bytes.find(SYNTHETIC_START_MARKER)
-    if start_pos == -1:
-        errors.append(f"Missing synthetic start marker: {SYNTHETIC_START_MARKER.decode('utf-8', errors='replace')}")
-
-    # 3. End marker check
     end_pos = raw_bytes.find(SYNTHETIC_END_MARKER)
-    if end_pos == -1:
-        errors.append(f"Missing synthetic end marker: {SYNTHETIC_END_MARKER.decode('utf-8', errors='replace')}")
 
-    # 4. Marker ordering check
-    if start_pos != -1 and end_pos != -1:
-        if start_pos >= end_pos:
-            errors.append(
-                f"Invalid marker ordering: start marker at offset {start_pos} "
-                f"occurs at or after end marker at offset {end_pos}"
-            )
+    body_bytes = raw_bytes
 
-    # 5. UTF-8 decoding check
+    if start_pos != -1 or end_pos != -1:
+        checks.extend(["start_marker_exists", "end_marker_exists", "marker_ordering"])
+        if start_pos == -1:
+            errors.append(f"Missing synthetic start marker: {SYNTHETIC_START_MARKER.decode('utf-8', errors='replace')}")
+        if end_pos == -1:
+            errors.append(f"Missing synthetic end marker: {SYNTHETIC_END_MARKER.decode('utf-8', errors='replace')}")
+        if start_pos != -1 and end_pos != -1:
+            if start_pos >= end_pos:
+                errors.append(
+                    f"Invalid marker ordering: start marker at offset {start_pos} "
+                    f"occurs at or after end marker at offset {end_pos}"
+                )
+            else:
+                body_start = start_pos + len(SYNTHETIC_START_MARKER)
+                body_bytes = raw_bytes[body_start:end_pos]
+
+    # UTF-8 decoding check
     try:
-        text = raw_bytes.decode("utf-8")
-        details["line_count"] = len(text.splitlines())
+        text = body_bytes.decode("utf-8")
+        if "\x00" in text:
+            errors.append("Text content contains binary null bytes")
+        # Line count covers the full artifact (including markers) for consistency
+        full_text = raw_bytes.decode("utf-8")
+        details["line_count"] = len(full_text.splitlines())
+        details["char_count"] = len(text)
     except UnicodeDecodeError as e:
         errors.append(f"UTF-8 decoding failed: {e}")
 
