@@ -19,9 +19,9 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
   });
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+    <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl overflow-hidden">
       {/* Table Toolbar */}
-      <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row gap-4 justify-between items-center bg-slate-900/50">
+      <div className="p-4 border-b border-[#1E293B] flex flex-col sm:flex-row gap-4 justify-between items-center bg-[#131B2E]">
         <div className="relative w-full sm:w-64">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
           <input 
@@ -29,7 +29,7 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
             placeholder="Search filename..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+            className="w-full bg-[#0B0F1A] border border-[#1E293B] rounded-lg pl-9 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-pink-500"
           />
         </div>
         <div className="flex gap-4 w-full sm:w-auto">
@@ -38,7 +38,7 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
             <select 
               value={filterPriority}
               onChange={(e) => setFilterPriority(e.target.value as any)}
-              className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+              className="bg-[#0B0F1A] border border-[#1E293B] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-pink-500"
             >
               <option value="ALL">All Priorities</option>
               <option value="CRITICAL">Critical</option>
@@ -50,7 +50,7 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
           <select 
             value={filterCategory}
             onChange={(e) => setFilterCategory(e.target.value as any)}
-            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+            className="bg-[#0B0F1A] border border-[#1E293B] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-pink-500"
           >
             <option value="ALL">All Categories</option>
             <option value="DOCUMENT">Document</option>
@@ -65,78 +65,57 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
       {/* Table */}
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
-          <thead className="bg-slate-950 text-slate-400">
+          <thead className="bg-[#0B0F1A] text-slate-400">
             <tr>
-              <th className="px-6 py-4 font-medium">Artifact</th>
-              <th className="px-6 py-4 font-medium">Priority / Status</th>
+              <th className="px-6 py-4 font-medium">File</th>
+              <th className="px-6 py-4 font-medium">Status</th>
+              <th className="px-6 py-4 font-medium">Priority</th>
               <th className="px-6 py-4 font-medium">Confidence</th>
-              <th className="px-6 py-4 font-medium">Provenance (Bytes)</th>
-              <th className="px-6 py-4 font-medium">Validation</th>
-              <th className="px-6 py-4 font-medium">Action</th>
+              <th className="px-6 py-4 font-medium">Size</th>
+              <th className="px-6 py-4 font-medium"></th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/50">
+          <tbody className="divide-y divide-[#1E293B]">
             {filtered.map(artifact => (
-              <tr key={artifact.id} className="hover:bg-slate-800/20 transition-colors">
+              <tr key={artifact.id} className="hover:bg-[#1E293B]/30 transition-colors">
                 <td className="px-6 py-4">
-                  <div className="flex items-start gap-3">
-                    <File className="w-5 h-5 text-slate-500 mt-0.5 shrink-0" />
+                  <div className="flex items-center gap-3">
+                    <File className="w-5 h-5 text-slate-500 shrink-0" />
                     <div>
-                      <p className="font-medium text-slate-200">{artifact.filename}</p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        {artifact.category} • {artifact.mime_type}
-                      </p>
-                      <p className="text-xs text-cyan-500 mt-1 font-mono">
-                        {artifact.reconstruction_method}
+                      <p className="font-medium text-white">{artifact.filename}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {artifact.category}
                       </p>
                     </div>
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  <div className="flex flex-col gap-2 items-start">
-                    <PriorityBadge priority={artifact.priority} />
-                    <StatusBadge status={artifact.status} />
-                  </div>
+                  <StatusBadge status={artifact.status} />
+                </td>
+                <td className="px-6 py-4">
+                  <PriorityBadge priority={artifact.priority} />
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
                     <span className="font-mono font-medium text-slate-300 w-8">{artifact.confidence_score}%</span>
-                    <div className="w-24 h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div className="w-24 h-2 bg-[#0B0F1A] rounded-full overflow-hidden border border-[#1E293B]">
                       <div 
                         className={`h-full rounded-full ${
-                          artifact.confidence_score > 80 ? 'bg-emerald-500' :
-                          artifact.confidence_score > 50 ? 'bg-amber-500' : 'bg-red-500'
+                          artifact.confidence_score > 80 ? 'bg-sky-400' :
+                          artifact.confidence_score > 50 ? 'bg-pink-500' : 'bg-rose-500'
                         }`}
                         style={{ width: `${artifact.confidence_score}%` }}
                       />
                     </div>
                   </div>
                 </td>
-                <td className="px-6 py-4 font-mono text-xs">
-                  <div className="flex items-center gap-1.5 px-2 py-1 bg-slate-950 border border-slate-800 rounded-md w-fit">
-                    <span className="text-emerald-400" title="Verified Bytes">{artifact.verified_bytes}</span>
-                    <span className="text-slate-700">/</span>
-                    <span className="text-amber-400" title="Reconstructed Gap">{artifact.reconstructed_bytes}</span>
-                    <span className="text-slate-700">/</span>
-                    <span className="text-rose-400" title="Missing Bytes">{artifact.missing_bytes}</span>
-                  </div>
+                <td className="px-6 py-4 text-xs text-slate-300">
+                  {artifact.verified_bytes} B verified
                 </td>
-                <td className="px-6 py-4">
-                  {artifact.validation.valid ? (
-                    <span className="text-emerald-400 text-xs font-medium bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">PASSED</span>
-                  ) : (
-                    <div className="flex flex-col gap-1">
-                      <span className="text-red-400 text-xs font-medium bg-red-500/10 px-2 py-1 rounded border border-red-500/20 inline-block w-fit">FAILED</span>
-                      <span className="text-xs text-slate-500 truncate max-w-[150px]" title={artifact.validation.error}>
-                        {artifact.validation.error}
-                      </span>
-                    </div>
-                  )}
-                </td>
-                <td className="px-6 py-4">
+                <td className="px-6 py-4 text-right">
                   <Link 
                     href={`/artifacts/${artifact.id}`}
-                    className="inline-flex items-center gap-1 text-sm font-medium text-cyan-400 hover:text-cyan-300 transition-colors"
+                    className="inline-flex items-center gap-1 text-sm font-medium text-sky-400 hover:text-sky-300 transition-colors"
                   >
                     Inspect <ChevronRight className="w-4 h-4" />
                   </Link>
@@ -147,7 +126,9 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
             {filtered.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
-                  No artifacts match the current filters.
+                  {artifacts.length === 0 
+                    ? "No artifacts recovered yet. Upload a file to begin analysis."
+                    : "No artifacts match the current filters."}
                 </td>
               </tr>
             )}

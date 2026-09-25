@@ -22,17 +22,17 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
   };
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+    <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-3">
-          <BrainCircuit className="w-6 h-6 text-cyan-400" />
-          <h2 className="text-xl font-semibold text-slate-100">AI Evidence Brief</h2>
+          <BrainCircuit className="w-6 h-6 text-pink-500" />
+          <h2 className="text-xl font-semibold text-white">AI Evidence Brief</h2>
         </div>
         <div className="flex items-center gap-3">
           <span className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border rounded-lg ${
             brief?.cached 
-              ? 'bg-slate-900/50 text-slate-400 border-slate-700/50' 
-              : 'bg-cyan-950/30 text-cyan-400 border-cyan-500/20'
+              ? 'bg-[#0B0F1A] text-slate-400 border-[#1E293B]' 
+              : 'bg-sky-400/10 text-sky-400 border-sky-400/20'
           }`}>
             <Zap className="w-3.5 h-3.5" /> 
             {brief?.cached ? 'CACHED AI BRIEF' : 'REAL-TIME AI BRIEF'}
@@ -40,17 +40,17 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
           <button 
             onClick={refreshBrief}
             disabled={loading}
-            className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            className="flex items-center gap-2 px-3 py-1 bg-pink-500/15 hover:bg-pink-500/25 text-pink-400 text-xs rounded-lg transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-cyan-400' : ''}`} />
-            {loading ? 'Regenerating...' : 'Regenerate / Verify AI Brief'}
+            <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin text-pink-500' : ''}`} />
+            {loading ? 'Regenerating...' : 'Refresh'}
           </button>
         </div>
       </div>
 
       {brief ? (
         <div className="space-y-6">
-          <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
+          <div className="bg-[#0B0F1A] p-4 rounded-lg border border-[#1E293B]">
             <h3 className="text-sm font-semibold text-slate-400 mb-2 uppercase tracking-wider">Executive Summary</h3>
             <p className="text-slate-200">{brief.summary}</p>
           </div>
@@ -60,7 +60,7 @@ export function AIEvidenceBrief({ artifact, initialBrief }: { artifact: Artifact
             <ul className="space-y-3">
               {brief.details.map((detail, idx) => (
                 <li key={idx} className="flex items-start gap-3 text-sm text-slate-300">
-                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-500 mt-1.5 shrink-0" />
+                  <div className="w-1.5 h-1.5 rounded-full bg-pink-500 mt-1.5 shrink-0" />
                   <span>{detail}</span>
                 </li>
               ))}

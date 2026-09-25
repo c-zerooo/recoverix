@@ -5,12 +5,12 @@ export function ValidationResults({ artifact }: { artifact: Artifact }) {
   const { valid, checks, error } = artifact.validation;
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-      <h2 className="text-xl font-semibold text-slate-100 mb-6">Structural Validation</h2>
+    <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-6">
+      <h2 className="text-xl font-semibold text-white mb-6">Structural Validation</h2>
       
       {error && (
-        <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 rounded-lg p-4 flex items-start gap-3 mb-6">
-          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-rose-500" />
+        <div className="bg-pink-500/10 border border-pink-500/30 text-pink-500 rounded-lg p-4 flex items-start gap-3 mb-6">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-pink-500" />
           <div className="text-sm">
             <span className="font-semibold block mb-1">Defensive Bounds Checking</span>
             <p>The parser rejected malformed structure: <span className="font-mono">{error}</span>.</p>
@@ -22,11 +22,11 @@ export function ValidationResults({ artifact }: { artifact: Artifact }) {
       <div className="space-y-3">
         {checks && checks.length > 0 ? (
           checks.map((check, idx) => (
-            <div key={idx} className="flex items-start gap-3 bg-slate-950 p-3 rounded-lg border border-slate-800">
+            <div key={idx} className="flex items-start gap-3 bg-[#0B0F1A] p-3 rounded-lg border border-[#1E293B]">
               {check.passed ? (
-                <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
               ) : (
-                <XCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                <XCircle className="w-5 h-5 text-pink-500 shrink-0 mt-0.5" />
               )}
               <div>
                 <p className="font-medium text-slate-200 text-sm">{check.name}</p>

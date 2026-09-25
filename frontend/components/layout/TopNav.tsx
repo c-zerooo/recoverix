@@ -1,34 +1,38 @@
+"use client";
+
 import Link from "next/link";
-import { HardDrive } from "lucide-react";
+import { usePathname } from "next/navigation";
 
 export function TopNav() {
+  const pathname = usePathname();
+  
   return (
-    <nav className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-md sticky top-0 z-50">
+    <nav className="border-b border-[#1E293B] bg-[#0B0F1A]/80 backdrop-blur-md sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        <div className="flex items-center gap-6">
-          <Link href="/" className="flex items-center gap-2 group">
-            <HardDrive className="w-5 h-5 text-cyan-400 group-hover:text-cyan-300 transition-colors" />
-            <span className="font-bold text-lg text-slate-100 tracking-tight">
-              RECOVER<span className="text-cyan-400">IX</span>
-            </span>
-          </Link>
+        <Link href="/" className="font-bold text-lg text-white tracking-tight">
+          Recoverix
+        </Link>
 
-          <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-slate-900 border border-slate-800 rounded-full text-xs font-mono text-slate-400">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>ENGINE READY</span>
-            <span className="text-slate-600">•</span>
-            <span>MAX_GAP: 4096B</span>
-            <span className="text-slate-600">•</span>
-            <span>MAX_IMAGE: 5MB</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4 text-sm font-medium">
-          <Link href="/" className="text-slate-400 hover:text-cyan-400 transition-colors">
-            Upload Evidence
+        <div className="flex items-center gap-6 text-sm font-medium h-full">
+          <Link 
+            href="/" 
+            className={`h-full flex items-center px-1 border-b-2 transition-colors ${
+              pathname === '/' || pathname === ''
+                ? 'border-pink-500 text-pink-500' 
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            Upload
           </Link>
-          <Link href="/dashboard" className="text-slate-400 hover:text-cyan-400 transition-colors">
-            Investigator Dashboard
+          <Link 
+            href="/dashboard" 
+            className={`h-full flex items-center px-1 border-b-2 transition-colors ${
+              pathname?.startsWith('/dashboard') || pathname?.startsWith('/artifacts')
+                ? 'border-pink-500 text-pink-500' 
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            Dashboard
           </Link>
         </div>
       </div>

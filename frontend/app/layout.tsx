@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { TopNav } from "@/components/layout/TopNav";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -17,8 +18,6 @@ export const metadata: Metadata = {
   description: "Deterministic digital evidence recovery and grounded AI interpretation",
 };
 
-import { TopNav } from "@/components/layout/TopNav";
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -29,7 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
-      <body className="font-sans antialiased bg-slate-950 text-slate-100 min-h-full flex flex-col">
+      <body className="font-sans antialiased bg-[#0B0F1A] text-slate-100 min-h-full flex flex-col">
         <TopNav />
         {children}
       </body>

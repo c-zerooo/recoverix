@@ -8,14 +8,14 @@ function cn(...inputs: ClassValue[]) {
 
 export function PriorityBadge({ priority }: { priority: PriorityLevel }) {
   const styles: Record<PriorityLevel, string> = {
-    CRITICAL: "bg-red-500/10 text-red-400 border-red-500/20",
-    HIGH: "bg-orange-500/10 text-orange-400 border-orange-500/20",
-    MEDIUM: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-    LOW: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    CRITICAL: "bg-pink-500/10 text-pink-500 border-pink-500/20",
+    HIGH: "bg-pink-500/10 text-pink-500 border-pink-500/20",
+    MEDIUM: "bg-sky-400/10 text-sky-400 border-sky-400/20",
+    LOW: "bg-sky-400/10 text-sky-400 border-sky-400/20",
   };
 
   return (
-    <span className={cn("px-2.5 py-0.5 rounded-full text-xs font-medium border", styles[priority])}>
+    <span className={cn("px-2.5 py-0.5 rounded-md text-xs font-medium border", styles[priority])}>
       {priority}
     </span>
   );
@@ -37,7 +37,7 @@ export function StatusBadge({ status }: { status: RecoveryStatus }) {
   };
 
   return (
-    <span className={cn("px-2.5 py-0.5 rounded-full text-xs font-medium border", styles[status])}>
+    <span className={cn("px-2.5 py-0.5 rounded-md text-xs font-medium border", styles[status])}>
       {labels[status]}
     </span>
   );

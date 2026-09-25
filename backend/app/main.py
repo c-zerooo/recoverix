@@ -36,7 +36,4 @@ def health_check():
     """Health check endpoint."""
     return {"status": "ok", "service": "recoverix-api"}
 
-@app.on_event("startup")
-def seed_initial_case():
-    from backend.app.seed import ensure_case_001_seeded
-    ensure_case_001_seeded()
+# startup event removed

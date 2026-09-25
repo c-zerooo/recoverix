@@ -2,153 +2,146 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams, useRouter } from "next/navigation";
-import { fetchCase, fetchArtifacts, fetchGroundTruth } from "@/lib/api";
-import { Metrics } from "@/components/dashboard/Metrics";
+import { useSearchParams } from "next/navigation";
+import { fetchCase, fetchArtifacts } from "@/lib/api";
 import { ArtifactTable } from "@/components/dashboard/ArtifactTable";
-import { ArrowLeft, ShieldAlert, CheckCircle, AlertOctagon, Loader2 } from "lucide-react";
-import { StatusBadge } from "@/components/dashboard/PriorityBadge";
-import { Case, Artifact, GroundTruth } from "@/lib/types";
+import { Loader2, UploadCloud } from "lucide-react";
+import { Case, Artifact } from "@/lib/types";
 
 export default function DashboardPage() {
   const searchParams = useSearchParams();
-  const [data, setData] = useState<{ caseData: Case; artifacts: Artifact[]; groundTruth: GroundTruth } | null>(null);
+  const [data, setData] = useState<{ caseData: Case | null; artifacts: Artifact[] }>({ caseData: null, artifacts: [] });
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     async function loadData() {
+      setIsLoading(true);
       const urlId = searchParams.get('case_id');
       const localId = typeof window !== 'undefined' ? localStorage.getItem('recoverix_active_case_id') : null;
-      const activeCaseId = urlId || localId || 'case_001';
+      const activeCaseId = urlId || localId;
       
-      const [c, a, g] = await Promise.all([
-        fetchCase(activeCaseId),
-        fetchArtifacts(activeCaseId),
-        fetchGroundTruth()
-      ]);
-      
-      // Cache artifacts in localStorage for instant access if needed
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(`recoverix_artifacts_${activeCaseId}`, JSON.stringify(a));
+      if (!activeCaseId) {
+        setIsLoading(false);
+        return;
       }
-      
-      setData({ caseData: c, artifacts: a, groundTruth: g });
+
+      try {
+        const [c, a] = await Promise.all([
+          fetchCase(activeCaseId),
+          fetchArtifacts(activeCaseId)
+        ]);
+
+        const hasLegacyArtifacts = a.some((art: Artifact) => 
+          ['fragmented_contacts.csv', 'corrupted.png', 'ledger.csv', 'auth_trace.txt'].includes(art.filename)
+        );
+
+        if (hasLegacyArtifacts && typeof window !== 'undefined') {
+          localStorage.removeItem('recoverix_active_case_id');
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith('recoverix_artifacts_')) {
+              localStorage.removeItem(key);
+            }
+          }
+          setData({ caseData: null, artifacts: [] });
+          setIsLoading(false);
+          return;
+        }
+        
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(`recoverix_artifacts_${activeCaseId}`, JSON.stringify(a));
+        }
+        
+        setData({ caseData: c, artifacts: a });
+      } catch (err) {
+        // Fallback to empty if case not found
+        setData({ caseData: null, artifacts: [] });
+      } finally {
+        setIsLoading(false);
+      }
     }
     loadData();
   }, [searchParams]);
 
-  if (!data) {
+  if (isLoading) {
     return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <Loader2 className="w-12 h-12 text-cyan-400 animate-spin" />
+      <main className="min-h-screen bg-[#0B0F1A] flex items-center justify-center">
+        <Loader2 className="w-12 h-12 text-pink-500 animate-spin" />
       </main>
     );
   }
 
-  const { caseData, artifacts, groundTruth } = data;
+  const { caseData, artifacts } = data;
+  
+  const totalArts = artifacts.length;
+  const fullyRec = artifacts.filter(a => a.status === 'FULLY_RECOVERED').length;
+  const partialRec = artifacts.filter(a => a.status === 'PARTIALLY_RECOVERED' || a.status === 'CORRUPTED').length;
+  const highCrit = artifacts.filter(a => a.priority === 'HIGH' || a.priority === 'CRITICAL').length;
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-200 py-8 px-6">
-      <div className="max-w-7xl mx-auto space-y-8">
-        {/* Header Navigation */}
-        <div>
-          <div className="flex justify-between items-center mb-6">
-            <Link href="/" className="inline-flex items-center text-sm text-cyan-500 hover:text-cyan-400">
-              <ArrowLeft className="w-4 h-4 mr-2" /> Change Evidence
+    <main className="min-h-screen bg-[#0B0F1A] text-slate-200 py-8 px-6">
+      <div className="max-w-7xl mx-auto space-y-6">
+        {/* Compact Header */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <Link href="/" className="inline-flex items-center text-sm text-slate-400 hover:text-slate-200 transition-colors bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.08] px-3 py-1.5 rounded-lg">
+              <UploadCloud className="w-4 h-4 mr-2" /> Upload New File
             </Link>
-            <button 
-              onClick={() => {
-                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
-                const anchor = document.createElement('a');
-                anchor.href = dataStr;
-                anchor.download = `recoverix_report_${caseData.id}.json`;
-                anchor.click();
-              }}
-              className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm px-3 py-1.5 rounded-lg border border-slate-700 transition-colors"
-            >
-              Export Case Report (JSON)
-            </button>
+            <h1 className="text-2xl font-semibold tracking-tight text-white border-l border-[#1E293B] pl-4">
+              Case Results
+            </h1>
           </div>
           
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-3 mb-2">
-                <ShieldAlert className="w-8 h-8 text-cyan-400" />
-                <h1 className="text-3xl font-bold tracking-tight text-slate-100">
-                  {caseData.name}
-                </h1>
-              </div>
-              <p className="text-slate-400">
-                {caseData.description}
-              </p>
-              <div className="flex items-center gap-2 mt-4 text-xs font-mono text-slate-500">
-                <span className="bg-slate-900 px-2 py-1 rounded border border-slate-800">
-                  ID: {caseData.id}
-                </span>
-                <span className="bg-slate-900 px-2 py-1 rounded border border-slate-800">
-                  SHA-256: 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4
-                </span>
-              </div>
-            </div>
-          </div>
+          <button 
+            onClick={() => {
+              if (!caseData) return;
+              const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+              const anchor = document.createElement('a');
+              anchor.href = dataStr;
+              anchor.download = `recoverix_report_${caseData.id}.json`;
+              anchor.click();
+            }}
+            disabled={!caseData}
+            className="bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.1] text-white text-xs font-medium px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
+          >
+            Export JSON
+          </button>
         </div>
 
-        {/* KPIs */}
-        <Metrics artifacts={artifacts} />
+        {/* 4-column Stat Strip */}
+        <div className="bg-[#111622] border border-white/[0.08] rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 divide-x divide-white/[0.08]">
+          <div className="px-4">
+            <div className="flex items-center gap-1.5 mb-1">
+              <div className="w-2 h-2 rounded-full bg-slate-500" />
+              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Total Artifacts</span>
+            </div>
+            <p className="text-2xl font-semibold text-white">{totalArts}</p>
+          </div>
+          <div className="px-4">
+            <div className="flex items-center gap-1.5 mb-1">
+              <div className="w-2 h-2 rounded-full bg-sky-400" />
+              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Fully Recovered</span>
+            </div>
+            <p className="text-2xl font-semibold text-white">{fullyRec}</p>
+          </div>
+          <div className="px-4">
+            <div className="flex items-center gap-1.5 mb-1">
+              <div className="w-2 h-2 rounded-full bg-pink-400" />
+              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Partial / Corrupted</span>
+            </div>
+            <p className="text-2xl font-semibold text-white">{partialRec}</p>
+          </div>
+          <div className="px-4">
+            <div className="flex items-center gap-1.5 mb-1">
+              <div className="w-2 h-2 rounded-full bg-rose-500" />
+              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">High / Critical</span>
+            </div>
+            <p className="text-2xl font-semibold text-white">{highCrit}</p>
+          </div>
+        </div>
 
         {/* Artifacts Table */}
-        <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-slate-100">Recovered Artifacts</h2>
-          <ArtifactTable artifacts={artifacts} />
-        </div>
-
-        {/* Synthetic Ground-Truth Verification */}
-        <div className="space-y-4 pt-8">
-          <h2 className="text-xl font-semibold text-slate-100">Synthetic Ground-Truth Verification (Expected vs. Detected vs. Reconstructed)</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {groundTruth.expected_artifacts.map((expected) => {
-              const actual = artifacts.find(a => a.id === expected.id || a.filename === expected.filename);
-              const isMatch = actual && actual.status === expected.expected_status;
-              
-              return (
-                <div key={expected.id} className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <p className="font-semibold text-slate-200">{expected.filename}</p>
-                      <p className="text-xs text-slate-500 font-mono mt-1">Scenario: {expected.scenario}</p>
-                    </div>
-                    {isMatch ? (
-                      <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded text-[10px] font-bold uppercase">
-                        <CheckCircle className="w-3 h-3" />
-                        100% Deterministic Match
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5 px-2 py-1 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded text-[10px] font-bold uppercase">
-                        <AlertOctagon className="w-3 h-3" />
-                        Mismatch
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="space-y-3 mt-4">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-slate-500">Expected Status</span>
-                      <StatusBadge status={expected.expected_status} />
-                    </div>
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-slate-500">Actual Status</span>
-                      {actual ? <StatusBadge status={actual.status} /> : <span className="text-slate-600">Not Found</span>}
-                    </div>
-                    <div className="pt-2 border-t border-slate-800">
-                      <p className="text-[10px] font-mono text-slate-600 truncate" title={expected.original_sha256}>
-                        SHA256: {expected.original_sha256.substring(0, 16)}...
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <ArtifactTable artifacts={artifacts} />
       </div>
     </main>
   );

@@ -35,9 +35,7 @@ def create_case(payload: CaseCreate) -> CaseResponse:
 @router.get("/{case_id}", response_model=CaseResponse, status_code=status.HTTP_200_OK)
 def get_case(case_id: str) -> CaseResponse:
     """Retrieve details for a specific forensic case."""
-    if case_id == "case_001":
-        from backend.app.seed import ensure_case_001_seeded
-        ensure_case_001_seeded()
+    # case_001 auto-seed removed
         
     case_res = store.get_case(case_id)
     if case_res is None:
@@ -125,9 +123,7 @@ async def upload_evidence(
 @router.get("/{case_id}/groundtruth", status_code=status.HTTP_200_OK)
 def get_groundtruth(case_id: str):
     """Return synthetic ground-truth for UI verification."""
-    if case_id == "case_001":
-        from backend.app.seed import ensure_case_001_seeded
-        ensure_case_001_seeded()
+    # case_001 auto-seed removed
         
     return {
         "case_id": case_id,

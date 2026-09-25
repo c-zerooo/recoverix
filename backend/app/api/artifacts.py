@@ -34,19 +34,6 @@ def _enrich_artifact(artifact: ArtifactResponse) -> ArtifactResponse:
         except:
             pass
 
-    # Patch BIFRAGMENT gap scenario for fragmented_contacts.csv
-    if "fragmented_contacts.csv" in preview:
-        enriched.status = "PARTIALLY_RECOVERED"
-        enriched.provenance.reconstructed_bytes = 1024
-        enriched.provenance.missing_bytes = 512
-        enriched.provenance.reconstruction_method = "BIFRAGMENT_GAP"
-        enriched.confidence_score = 65
-        enriched.score_breakdown.total = 65
-    elif "corrupted.png" in preview:
-        enriched.category = "PHOTO_MEDIA"
-        enriched.priority = "HIGH"
-        enriched.status = "CORRUPTED"
-        
     if enriched.category is None:
         enriched.category = classify_artifact(enriched.format, enriched.content_preview)
     if enriched.priority is None:
@@ -61,9 +48,6 @@ def _enrich_artifact(artifact: ArtifactResponse) -> ArtifactResponse:
 @router.get("/cases/{case_id}/artifacts", response_model=List[ArtifactResponse], status_code=status.HTTP_200_OK)
 def list_case_artifacts(case_id: str) -> List[ArtifactResponse]:
     """Retrieve all recovered artifacts associated with a specific case."""
-    if case_id == "case_001":
-        from backend.app.seed import ensure_case_001_seeded
-        ensure_case_001_seeded()
 
     case = store.get_case(case_id)
     if case is None:
