@@ -17,6 +17,8 @@ export const metadata: Metadata = {
   description: "Deterministic digital evidence recovery and grounded AI interpretation",
 };
 
+import { TopNav } from "@/components/layout/TopNav";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -28,6 +30,7 @@ export default function RootLayout({
       className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
       <body className="font-sans antialiased bg-slate-950 text-slate-100 min-h-full flex flex-col">
+        <TopNav />
         {children}
       </body>
     </html>

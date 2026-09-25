@@ -423,3 +423,70 @@ export async function fetchArtifactExplanation(artifactId: string): Promise<AIEx
   explanationCache.set(artifactId, explanation);
   return explanation;
 }
+
+export const mockGroundTruth: import('./types').GroundTruth = {
+  case_id: "case_001",
+  image_filename: "phantom_disk.img",
+  expected_artifacts: [
+    {
+      id: "artifact_002",
+      filename: "auth_trace.txt",
+      scenario: 'CLEAN_CONTIGUOUS',
+      expected_status: 'FULLY_RECOVERED',
+      original_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      total_bytes: 1500
+    },
+    {
+      id: "artifact_005",
+      filename: "deleted_notes.txt",
+      scenario: 'DELETED',
+      expected_status: 'FULLY_RECOVERED',
+      original_sha256: "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce",
+      total_bytes: 350
+    },
+    {
+      id: "artifact_006",
+      filename: "contacts.csv",
+      scenario: 'FRAGMENTED',
+      expected_status: 'PARTIALLY_RECOVERED',
+      original_sha256: "e57929424c52f6f4d2b2cd33a35a60e0a359fa5b5f6b216964ff8dbd846f499b",
+      total_bytes: 3072
+    },
+    {
+      id: "artifact_001",
+      filename: "ledger.csv",
+      scenario: 'BIFRAGMENT_GAP',
+      expected_status: 'PARTIALLY_RECOVERED',
+      original_sha256: "db838b0008892787e38318db51ff56bbcf793a8904571f30e61d8bc5eefbd427",
+      total_bytes: 10000
+    },
+    {
+      id: "artifact_003",
+      filename: "evidence_capture.png",
+      scenario: 'CORRUPTED',
+      expected_status: 'CORRUPTED',
+      original_sha256: "740f95fc74e0d4df7cc23999ec9da7c0a6a246dd24b3383a5ea45145cd338fc1",
+      total_bytes: 2500
+    },
+    {
+      id: "artifact_004",
+      filename: "damaged_sector.txt",
+      scenario: 'UNRECOVERABLE',
+      expected_status: 'UNRECOVERABLE',
+      original_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      total_bytes: 1000
+    }
+  ]
+};
+
+export async function fetchGroundTruth(caseId = 'case_001'): Promise<import('./types').GroundTruth> {
+  if (!USE_MOCK) {
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/groundtruth`, { cache: 'no-store' });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn("Backend unreachable, falling back to mock fetchGroundTruth", e);
+    }
+  }
+  return mockGroundTruth;
+}

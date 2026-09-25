@@ -112,18 +112,13 @@ export function ArtifactTable({ artifacts }: { artifacts: Artifact[] }) {
                     </div>
                   </div>
                 </td>
-                <td className="px-6 py-4 font-mono text-xs space-y-1">
-                  <div className="flex justify-between w-32">
-                    <span className="text-slate-500">Verified:</span>
-                    <span className="text-emerald-400">{artifact.verified_bytes}</span>
-                  </div>
-                  <div className="flex justify-between w-32">
-                    <span className="text-slate-500">Recon:</span>
-                    <span className="text-amber-400">{artifact.reconstructed_bytes}</span>
-                  </div>
-                  <div className="flex justify-between w-32">
-                    <span className="text-slate-500">Missing:</span>
-                    <span className="text-red-400">{artifact.missing_bytes}</span>
+                <td className="px-6 py-4 font-mono text-xs">
+                  <div className="flex items-center gap-1.5 px-2 py-1 bg-slate-950 border border-slate-800 rounded-md w-fit">
+                    <span className="text-emerald-400" title="Verified Bytes">{artifact.verified_bytes}</span>
+                    <span className="text-slate-700">/</span>
+                    <span className="text-amber-400" title="Reconstructed Gap">{artifact.reconstructed_bytes}</span>
+                    <span className="text-slate-700">/</span>
+                    <span className="text-rose-400" title="Missing Bytes">{artifact.missing_bytes}</span>
                   </div>
                 </td>
                 <td className="px-6 py-4">
