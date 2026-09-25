@@ -3,13 +3,19 @@ export type PriorityLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 export type RecoveryStatus = 'FULLY_RECOVERED' | 'PARTIALLY_RECOVERED' | 'CORRUPTED' | 'UNRECOVERABLE';
 export type ReconstructionMethod = 'CONTIGUOUS' | 'BIFRAGMENT_GAP' | 'NONE';
 
+/**
+ * Deterministic 100-point rubric breakdown.
+ * Note: These status thresholds (85-100: FULLY_RECOVERED, 50-84: PARTIALLY_RECOVERED, 
+ * 20-49: CORRUPTED, 0-19: UNRECOVERABLE) are our prototype policy, 
+ * not an established forensic standard.
+ */
 export interface ConfidenceBreakdown {
-  header_validity: number;
-  footer_validity: number;
-  structural_validation: number;
-  size_plausibility: number;
-  reconstruction_integrity: number;
-  total: number;
+  header_validity: number; // max 20
+  footer_validity: number; // max 20
+  structural_validation: number; // max 30
+  size_plausibility: number; // max 15
+  reconstruction_integrity: number; // max 15
+  total: number; // max 100
 }
 
 export interface ValidationCheck {
@@ -63,4 +69,19 @@ export interface Case {
   name: string;
   description: string;
   artifacts: Artifact[];
+}
+
+export interface GroundTruthExpectedArtifact {
+  id: string;
+  filename: string;
+  scenario: 'CLEAN_CONTIGUOUS' | 'DELETED' | 'FRAGMENTED' | 'BIFRAGMENT_GAP' | 'CORRUPTED' | 'UNRECOVERABLE';
+  expected_status: RecoveryStatus;
+  original_sha256: string;
+  total_bytes: number;
+}
+
+export interface GroundTruth {
+  case_id: string;
+  image_filename: string;
+  expected_artifacts: GroundTruthExpectedArtifact[];
 }

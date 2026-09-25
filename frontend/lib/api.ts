@@ -1,10 +1,32 @@
-import { Artifact, Case, AIExplanation } from './types';
+import { Artifact, Case, AIExplanation, ArtifactCategory, PriorityLevel } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK !== 'false';
 
+// Cache for AI Explanations to prevent redundant calls and enable instant live demos
+const explanationCache = new Map<string, AIExplanation>();
+
+export function classifyArtifact(filename: string, mimeType: string, previewText: string): ArtifactCategory {
+  const text = previewText.toLowerCase();
+  if (text.includes("auth_success") || text.includes("sudo") || text.includes("ip address") || text.includes("login")) return 'SYSTEM_TRACE';
+  if (filename.endsWith('.csv') || filename.endsWith('.db') || filename.endsWith('.sql')) return 'DATABASE_LOG';
+  if (mimeType.startsWith('image/') || filename.endsWith('.png') || filename.endsWith('.jpg')) return 'PHOTO_MEDIA';
+  if (filename.endsWith('.exe') || filename.endsWith('.dll') || filename.endsWith('.zip') || mimeType === 'application/octet-stream') return 'BINARY_ARCHIVE';
+  return 'DOCUMENT';
+}
+
+export function determinePriority(category: ArtifactCategory, previewText: string): PriorityLevel {
+  const text = previewText.toLowerCase();
+  if (text.includes("password") || text.includes("private key") || text.includes("sudo_exec") || text.includes("admin")) return 'CRITICAL';
+  if (category === 'DATABASE_LOG' && (text.includes("amount") || text.includes("transaction") || text.includes("balance"))) return 'HIGH';
+  if (category === 'PHOTO_MEDIA') return 'HIGH';
+  if (category === 'SYSTEM_TRACE') return 'MEDIUM';
+  return 'LOW';
+}
+
 export const mockArtifacts: Artifact[] = [
   {
+    // Scenario 4: Bifragment gap ledger.csv
     id: "artifact_001",
     filename: "ledger.csv",
     mime_type: "text/csv",
@@ -48,6 +70,7 @@ export const mockArtifacts: Artifact[] = [
     }
   },
   {
+    // Scenario 1: Clean/contiguous TXT
     id: "artifact_002",
     filename: "auth_trace.txt",
     mime_type: "text/plain",
@@ -89,6 +112,7 @@ export const mockArtifacts: Artifact[] = [
     }
   },
   {
+    // Scenario 5: Corrupted PNG with bounds check failure
     id: "artifact_003",
     filename: "evidence_capture.png",
     mime_type: "image/png",
@@ -134,6 +158,7 @@ export const mockArtifacts: Artifact[] = [
     }
   },
   {
+    // Scenario 6: Unrecoverable fragment
     id: "artifact_004",
     filename: "damaged_sector.txt",
     mime_type: "text/plain",
@@ -174,6 +199,93 @@ export const mockArtifacts: Artifact[] = [
         "Priority reasoning: LOW because no intelligible data exists."
       ]
     }
+  },
+  {
+    // Scenario 2: Deleted TXT with boundary note
+    id: "artifact_005",
+    filename: "deleted_notes.txt",
+    mime_type: "text/plain",
+    category: "DOCUMENT",
+    priority: "MEDIUM",
+    confidence_score: 86,
+    confidence_breakdown: {
+      header_validity: 20,
+      footer_validity: 20,
+      structural_validation: 16,
+      size_plausibility: 15,
+      reconstruction_integrity: 15,
+      total: 86
+    },
+    status: "FULLY_RECOVERED",
+    verified_bytes: 350,
+    reconstructed_bytes: 0,
+    missing_bytes: 0,
+    reconstruction_method: "CONTIGUOUS",
+    validation: {
+      valid: true,
+      checks: [
+        { name: "File Structure", detail: "Recovered via contiguous carving.", passed: true }
+      ]
+    },
+    fragments: [
+      { id: "frag_1", start_offset: 0, end_offset: 350, type: "VERIFIED" }
+    ],
+    preview_text: "[SYNTHETIC_ARTIFACT_START]\nMeet at 9PM to discuss the transfer.\n[SYNTHETIC_ARTIFACT_END]",
+    ai_summary: {
+      summary: "Deleted text document recovered successfully.",
+      details: [
+        "Recovered: Complete text content.",
+        "Verified: Carved using synthetic start and end markers.",
+        "Missing: None.",
+        "Status reasoning: 86/100 score, fully recovered.",
+        "Priority reasoning: MEDIUM due to suspicious meeting note."
+      ]
+    }
+  },
+  {
+    // Scenario 3: Fragmented CSV
+    id: "artifact_006",
+    filename: "contacts.csv",
+    mime_type: "text/csv",
+    category: "DATABASE_LOG",
+    priority: "MEDIUM",
+    confidence_score: 65,
+    confidence_breakdown: {
+      header_validity: 20,
+      footer_validity: 0,
+      structural_validation: 20,
+      size_plausibility: 10,
+      reconstruction_integrity: 15,
+      total: 65
+    },
+    status: "PARTIALLY_RECOVERED",
+    verified_bytes: 2048,
+    reconstructed_bytes: 1024,
+    missing_bytes: 1024,
+    reconstruction_method: "BIFRAGMENT_GAP",
+    validation: {
+      valid: true,
+      checks: [
+        { name: "Header Signature", detail: "Valid CSV header found.", passed: true },
+        { name: "Row Integrity", detail: "Some rows corrupted across fragmented gap.", passed: false }
+      ]
+    },
+    fragments: [
+      { id: "frag_1", start_offset: 0, end_offset: 1024, type: "VERIFIED" },
+      { id: "frag_2", start_offset: 1024, end_offset: 2048, type: "RECONSTRUCTED_GAP" },
+      { id: "frag_3", start_offset: 2048, end_offset: 3072, type: "VERIFIED" }
+    ],
+    preview_text: "name,email,phone\nJohn Doe,john@example.com,555-0101\n...<GAP>...Jane Doe,jane@example.com,555-0102\n",
+    ai_summary: {
+      summary: "Fragmented contacts list.",
+      details: [
+        "Recovered: Most contact rows.",
+        "Verified: Header and trailing block.",
+        "Missing: Middle gap containing ~1024 bytes.",
+        "Status reasoning: 65/100 score due to significant unrecovered gap.",
+        "Priority reasoning: MEDIUM for PII discovery."
+      ]
+    }
   }
 ];
 
@@ -184,21 +296,64 @@ export const mockCase: Case = {
   artifacts: mockArtifacts
 };
 
-export async function analyzeEvidence(payload?: { filename?: string; sampleId?: string }): Promise<Case> {
+export async function createCase(name?: string): Promise<Case> {
   if (!USE_MOCK) {
     try {
-      const res = await fetch(`${API_BASE}/api/cases/analyze`, {
+      const res = await fetch(`${API_BASE}/api/cases`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload || {}),
+        body: JSON.stringify({ name }),
         cache: 'no-store'
       });
       if (res.ok) return await res.json();
     } catch (e) {
-      console.warn("Backend unreachable, falling back to mock", e);
+      console.warn("Backend unreachable, falling back to mock createCase", e);
+    }
+  }
+  return { ...mockCase, name: name || mockCase.name };
+}
+
+export async function uploadEvidence(caseId: string, fileOrSample: File | string): Promise<{ success: boolean }> {
+  if (!USE_MOCK) {
+    try {
+      const formData = new FormData();
+      if (typeof fileOrSample === 'string') {
+        formData.append('sample', fileOrSample);
+      } else {
+        formData.append('file', fileOrSample);
+      }
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/evidence`, {
+        method: 'POST',
+        body: formData,
+        cache: 'no-store'
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn("Backend unreachable, falling back to mock uploadEvidence", e);
+    }
+  }
+  return { success: true };
+}
+
+export async function analyzeCase(caseId: string): Promise<Case> {
+  if (!USE_MOCK) {
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/analyze`, {
+        method: 'POST',
+        cache: 'no-store'
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn("Backend unreachable, falling back to mock analyzeCase", e);
     }
   }
   return mockCase;
+}
+
+export async function runFullIngestionAndAnalysis(fileOrSample: File | string): Promise<Case> {
+  const newCase = await createCase("Automated Case");
+  await uploadEvidence(newCase.id, fileOrSample);
+  return await analyzeCase(newCase.id);
 }
 
 export async function fetchCase(caseId = 'case_001'): Promise<Case> {
@@ -207,7 +362,7 @@ export async function fetchCase(caseId = 'case_001'): Promise<Case> {
       const res = await fetch(`${API_BASE}/api/cases/${caseId}`, { cache: 'no-store' });
       if (res.ok) return await res.json();
     } catch (e) {
-      console.warn("Backend unreachable, falling back to mock", e);
+      console.warn("Backend unreachable, falling back to mock fetchCase", e);
     }
   }
   return mockCase;
@@ -219,7 +374,7 @@ export async function fetchArtifacts(caseId = 'case_001'): Promise<Artifact[]> {
       const res = await fetch(`${API_BASE}/api/cases/${caseId}/artifacts`, { cache: 'no-store' });
       if (res.ok) return await res.json();
     } catch (e) {
-      console.warn("Backend unreachable, falling back to mock", e);
+      console.warn("Backend unreachable, falling back to mock fetchArtifacts", e);
     }
   }
   return mockArtifacts;
@@ -231,7 +386,7 @@ export async function fetchArtifactById(artifactId: string): Promise<Artifact> {
       const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, { cache: 'no-store' });
       if (res.ok) return await res.json();
     } catch (e) {
-      console.warn("Backend unreachable, falling back to mock", e);
+      console.warn("Backend unreachable, falling back to mock fetchArtifactById", e);
     }
   }
   const artifact = mockArtifacts.find(a => a.id === artifactId);
@@ -240,18 +395,31 @@ export async function fetchArtifactById(artifactId: string): Promise<Artifact> {
 }
 
 export async function fetchArtifactExplanation(artifactId: string): Promise<AIExplanation> {
+  // Check cache first for instant live demo response
+  if (explanationCache.has(artifactId)) {
+    return explanationCache.get(artifactId)!;
+  }
+
+  let explanation: AIExplanation | null = null;
   if (!USE_MOCK) {
     try {
       const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/explain`, {
         method: 'POST',
         cache: 'no-store'
       });
-      if (res.ok) return await res.json();
+      if (res.ok) explanation = await res.json();
     } catch (e) {
-      console.warn("Backend unreachable, falling back to mock", e);
+      console.warn("Backend unreachable, falling back to mock fetchArtifactExplanation", e);
     }
   }
-  const artifact = mockArtifacts.find(a => a.id === artifactId);
-  if (!artifact || !artifact.ai_summary) throw new Error("Explanation not available");
-  return artifact.ai_summary;
+  
+  if (!explanation) {
+    const artifact = mockArtifacts.find(a => a.id === artifactId);
+    if (!artifact || !artifact.ai_summary) throw new Error("Explanation not available");
+    explanation = artifact.ai_summary;
+  }
+
+  // Pre-warm/set cache
+  explanationCache.set(artifactId, explanation);
+  return explanation;
 }

@@ -41,12 +41,15 @@ export function ConfidenceBreakdown({ artifact }: { artifact: Artifact }) {
         ))}
       </div>
 
-      <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 text-xs text-slate-400 font-mono flex flex-wrap gap-x-4 gap-y-2 mb-4">
+      <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 text-xs text-slate-400 font-mono flex flex-wrap gap-x-4 gap-y-2 mb-2">
         <span>85-100: FULLY_RECOVERED</span>
         <span>50-84: PARTIALLY_RECOVERED</span>
         <span>20-49: CORRUPTED</span>
         <span>0-19: UNRECOVERABLE</span>
       </div>
+      <p className="text-xs text-slate-500 italic mb-4">
+        Note: These status thresholds (85–100, 50–84, 20–49, 0–19) are our prototype policy, not an established forensic standard.
+      </p>
 
       {artifact.reconstructed_bytes > 0 && (
         <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg p-4 flex items-start gap-3">
