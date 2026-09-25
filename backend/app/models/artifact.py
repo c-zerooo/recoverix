@@ -5,7 +5,7 @@ artifact.py — Artifact API models for Recoverix platform.
 from __future__ import annotations
 
 from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class ConfidenceBreakdownSchema(BaseModel):
@@ -45,3 +45,8 @@ class ArtifactResponse(BaseModel):
     ai_summary: Optional[str] = None
     content_preview: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @computed_field
+    @property
+    def confidence_breakdown(self) -> ConfidenceBreakdownSchema:
+        return self.score_breakdown

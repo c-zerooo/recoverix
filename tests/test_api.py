@@ -491,3 +491,41 @@ def test_corrupted_status_preservation_and_serialization():
     assert dump["status"] == "CORRUPTED"
     assert dump["confidence_score"] == 49
 
+
+# ── 26. Integration Contract & Schema Completeness Verification ──────
+
+def test_integration_contract_schema_and_unimplemented_explain():
+    """Verify that ArtifactResponse contains all deterministic fields and explain is unmapped."""
+    create_res = client.post("/api/cases", json={"name": "Contract Check Case"})
+    case_id = create_res.json()["case_id"]
+
+    evidence_content = (
+        b"[SYNTHETIC_ARTIFACT_START]\nfilename: contract.txt\ndata\n[SYNTHETIC_ARTIFACT_END]"
+    )
+    client.post(f"/api/cases/{case_id}/evidence", files={"file": ("contract.txt", evidence_content, "text/plain")})
+    analyze_res = client.post(f"/api/cases/{case_id}/analyze")
+    artifact_id = analyze_res.json()["artifacts"][0]["artifact_id"]
+
+    art_res = client.get(f"/api/artifacts/{artifact_id}")
+    assert art_res.status_code == 200
+    art_json = art_res.json()
+
+    # Required deterministic fields check
+    required_fields = [
+        "artifact_id", "case_id", "format", "size_bytes",
+        "confidence_score", "score_breakdown", "confidence_breakdown",
+        "status", "provenance", "category", "priority", "ai_summary", "metadata"
+    ]
+    for field in required_fields:
+        assert field in art_json, f"Missing required field: {field}"
+
+    # Verify classification/AI fields remain nullable (Member 2 domain)
+    assert art_json["category"] is None
+    assert art_json["priority"] is None
+    assert art_json["ai_summary"] is None
+
+    # Verify explain endpoint is not implemented (belongs to Member 2)
+    explain_res = client.post(f"/api/artifacts/{artifact_id}/explain")
+    assert explain_res.status_code in (404, 405)
+
+
