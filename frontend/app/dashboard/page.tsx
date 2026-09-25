@@ -1,14 +1,50 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useSearchParams, useRouter } from "next/navigation";
 import { fetchCase, fetchArtifacts, fetchGroundTruth } from "@/lib/api";
 import { Metrics } from "@/components/dashboard/Metrics";
 import { ArtifactTable } from "@/components/dashboard/ArtifactTable";
-import { ArrowLeft, ShieldAlert, CheckCircle, AlertOctagon } from "lucide-react";
+import { ArrowLeft, ShieldAlert, CheckCircle, AlertOctagon, Loader2 } from "lucide-react";
 import { StatusBadge } from "@/components/dashboard/PriorityBadge";
+import { Case, Artifact, GroundTruth } from "@/lib/types";
 
-export default async function DashboardPage() {
-  const caseData = await fetchCase();
-  const artifacts = await fetchArtifacts();
-  const groundTruth = await fetchGroundTruth();
+export default function DashboardPage() {
+  const searchParams = useSearchParams();
+  const [data, setData] = useState<{ caseData: Case; artifacts: Artifact[]; groundTruth: GroundTruth } | null>(null);
+
+  useEffect(() => {
+    async function loadData() {
+      const urlId = searchParams.get('case_id');
+      const localId = typeof window !== 'undefined' ? localStorage.getItem('recoverix_active_case_id') : null;
+      const activeCaseId = urlId || localId || 'case_001';
+      
+      const [c, a, g] = await Promise.all([
+        fetchCase(activeCaseId),
+        fetchArtifacts(activeCaseId),
+        fetchGroundTruth()
+      ]);
+      
+      // Cache artifacts in localStorage for instant access if needed
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(`recoverix_artifacts_${activeCaseId}`, JSON.stringify(a));
+      }
+      
+      setData({ caseData: c, artifacts: a, groundTruth: g });
+    }
+    loadData();
+  }, [searchParams]);
+
+  if (!data) {
+    return (
+      <main className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="w-12 h-12 text-cyan-400 animate-spin" />
+      </main>
+    );
+  }
+
+  const { caseData, artifacts, groundTruth } = data;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-200 py-8 px-6">
@@ -56,7 +92,7 @@ export default async function DashboardPage() {
           <h2 className="text-xl font-semibold text-slate-100">Synthetic Ground-Truth Verification (Expected vs. Detected vs. Reconstructed)</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {groundTruth.expected_artifacts.map((expected) => {
-              const actual = artifacts.find(a => a.id === expected.id);
+              const actual = artifacts.find(a => a.id === expected.id || a.filename === expected.filename);
               const isMatch = actual && actual.status === expected.expected_status;
               
               return (

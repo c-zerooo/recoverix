@@ -15,6 +15,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include routers matching locked API contract
 app.include_router(cases_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
@@ -25,3 +35,8 @@ app.include_router(artifacts_router, prefix="/api")
 def health_check():
     """Health check endpoint."""
     return {"status": "ok", "service": "recoverix-api"}
+
+@app.on_event("startup")
+def seed_initial_case():
+    from backend.app.seed import ensure_case_001_seeded
+    ensure_case_001_seeded()

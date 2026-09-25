@@ -1,26 +1,60 @@
+"use client";
+
+import { useEffect, useState, use } from "react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { fetchArtifactById, fetchArtifacts } from "@/lib/api";
-import { ArrowLeft, FileText, File } from "lucide-react";
+import { ArrowLeft, FileText, File, Loader2 } from "lucide-react";
 import { PriorityBadge, StatusBadge } from "@/components/dashboard/PriorityBadge";
 import { ConfidenceBreakdown } from "@/components/artifact/ConfidenceBreakdown";
 import { ProvenanceBar } from "@/components/artifact/ProvenanceBar";
 import { ValidationResults } from "@/components/artifact/ValidationResults";
 import { AIEvidenceBrief } from "@/components/artifact/AIEvidenceBrief";
+import { Artifact } from "@/lib/types";
 
-export default async function ArtifactPage({ params }: { params: Promise<{ id: string }> }) {
-  const resolvedParams = await params;
+export default function ArtifactPage({ params }: { params: Promise<{ id: string }> }) {
+  const resolvedParams = use(params);
   const artifactId = resolvedParams.id;
+  const [data, setData] = useState<{ artifact: Artifact; relatedArtifacts: Artifact[] } | null>(null);
+  const [error, setError] = useState(false);
 
-  let artifact;
-  try {
-    artifact = await fetchArtifactById(artifactId);
-  } catch (err) {
-    notFound();
+  useEffect(() => {
+    async function loadData() {
+      try {
+        const artifact = await fetchArtifactById(artifactId);
+        
+        const localCaseId = typeof window !== 'undefined' ? localStorage.getItem('recoverix_active_case_id') : null;
+        const activeCaseId = localCaseId || 'case_001';
+        
+        const allArtifacts = await fetchArtifacts(activeCaseId);
+        const relatedArtifacts = allArtifacts.filter(a => a.id !== artifact.id).slice(0, 3);
+        
+        setData({ artifact, relatedArtifacts });
+      } catch (err) {
+        console.error(err);
+        setError(true);
+      }
+    }
+    loadData();
+  }, [artifactId]);
+
+  if (error) {
+    return (
+      <main className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-200">
+        <h2 className="text-2xl font-bold mb-4">Artifact Not Found</h2>
+        <Link href="/dashboard" className="text-cyan-500 hover:underline">Return to Dashboard</Link>
+      </main>
+    );
   }
 
-  const allArtifacts = await fetchArtifacts();
-  const relatedArtifacts = allArtifacts.filter(a => a.id !== artifact.id).slice(0, 3);
+  if (!data) {
+    return (
+      <main className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="w-12 h-12 text-cyan-400 animate-spin" />
+      </main>
+    );
+  }
+
+  const { artifact, relatedArtifacts } = data;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-200 py-8 px-6">

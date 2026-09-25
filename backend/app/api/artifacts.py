@@ -38,6 +38,10 @@ def _enrich_artifact(artifact: ArtifactResponse) -> ArtifactResponse:
 @router.get("/cases/{case_id}/artifacts", response_model=List[ArtifactResponse], status_code=status.HTTP_200_OK)
 def list_case_artifacts(case_id: str) -> List[ArtifactResponse]:
     """Retrieve all recovered artifacts associated with a specific case."""
+    if case_id == "case_001":
+        from backend.app.seed import ensure_case_001_seeded
+        ensure_case_001_seeded()
+
     case = store.get_case(case_id)
     if case is None:
         raise HTTPException(

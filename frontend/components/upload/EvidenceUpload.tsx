@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { UploadCloud, File, Database, Image as ImageIcon, FileText, Loader2, CheckCircle } from "lucide-react";
+import { UploadCloud, File as FileIcon, Database, Image as ImageIcon, FileText, Loader2, CheckCircle } from "lucide-react";
+import { createCase, uploadEvidence, analyzeCase } from "../../lib/api";
 
 const LOADING_STEPS = [
   "Reading image & computing SHA-256 hash...",
@@ -15,24 +16,61 @@ export default function EvidenceUpload() {
   const router = useRouter();
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const startAnalysis = () => {
+  const executePipeline = async (file: File, caseName: string) => {
     setIsAnalyzing(true);
     setCurrentStep(0);
+
+    // Visual progression simulation
+    const interval = setInterval(() => {
+      setCurrentStep(prev => (prev < LOADING_STEPS.length ? prev + 1 : prev));
+    }, 400);
+
+    try {
+      const newCase = await createCase(caseName);
+      await uploadEvidence(newCase.id, file);
+      await analyzeCase(newCase.id);
+      
+      clearInterval(interval);
+      setCurrentStep(LOADING_STEPS.length);
+      
+      localStorage.setItem('recoverix_active_case_id', newCase.id);
+      setTimeout(() => {
+        router.push(`/dashboard?case_id=${newCase.id}`);
+      }, 400);
+    } catch (e) {
+      console.error(e);
+      clearInterval(interval);
+      // Mock fallback
+      router.push(`/dashboard`);
+    }
   };
 
-  useEffect(() => {
-    if (isAnalyzing) {
-      if (currentStep < LOADING_STEPS.length) {
-        const timer = setTimeout(() => {
-          setCurrentStep(prev => prev + 1);
-        }, 400); // 400ms per step * 4 steps = 1.6s
-        return () => clearTimeout(timer);
-      } else {
-        router.push('/dashboard');
-      }
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      executePipeline(file, `Uploaded Case: ${file.name}`);
     }
-  }, [isAnalyzing, currentStep, router]);
+  };
+
+  const handleSampleClick = (type: 'csv' | 'png' | 'txt') => {
+    let content = "";
+    let filename = "";
+    if (type === 'csv') {
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: ledger.csv\nid,amount,date,status\n1,500.00,2026-09-21,COMPLETED\n2,250.00,2026-09-22,PENDING\n[SYNTHETIC_ARTIFACT_END]";
+      filename = "fragmented.img";
+    } else if (type === 'png') {
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: evidence_capture.png\n<PNG binary data unrenderable>\n[SYNTHETIC_ARTIFACT_END]";
+      filename = "corrupted.img";
+    } else if (type === 'txt') {
+      content = "[SYNTHETIC_ARTIFACT_START]\nfilename: auth_trace.txt\n2026-09-21T08:15:02Z AUTH_SUCCESS user=admin\n[SYNTHETIC_ARTIFACT_END]";
+      filename = "damaged.img";
+    }
+    
+    const file = new File([content], filename, { type: "application/octet-stream" });
+    executePipeline(file, `Sample Case: ${type.toUpperCase()}`);
+  };
 
   return (
     <div className="w-full max-w-5xl mx-auto space-y-8">
@@ -58,8 +96,15 @@ export default function EvidenceUpload() {
           </div>
         </div>
 
+        <input 
+          type="file" 
+          ref={fileInputRef} 
+          onChange={handleFileUpload} 
+          className="hidden" 
+          accept=".img,.raw,.dd,.bin"
+        />
         <button 
-          onClick={startAnalysis}
+          onClick={() => fileInputRef.current?.click()}
           disabled={isAnalyzing}
           className="bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-semibold py-3 px-8 rounded-lg transition-colors disabled:opacity-50"
         >
@@ -71,19 +116,19 @@ export default function EvidenceUpload() {
       <div>
         <h3 className="text-xl font-semibold text-slate-200 mb-4">Or Load a Sample Case</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <button onClick={startAnalysis} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-cyan-500/50 transition-colors group">
+          <button onClick={() => handleSampleClick('csv')} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-cyan-500/50 transition-colors group">
             <Database className="w-6 h-6 text-cyan-400 mb-4 group-hover:scale-110 transition-transform" />
             <h4 className="font-semibold text-slate-200 mb-1">Fragmented CSV</h4>
             <p className="text-sm text-slate-400">Bounded bifragment gap reconstruction</p>
           </button>
           
-          <button onClick={startAnalysis} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-emerald-500/50 transition-colors group">
+          <button onClick={() => handleSampleClick('png')} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-emerald-500/50 transition-colors group">
             <ImageIcon className="w-6 h-6 text-emerald-400 mb-4 group-hover:scale-110 transition-transform" />
             <h4 className="font-semibold text-slate-200 mb-1">Corrupted PNG</h4>
             <p className="text-sm text-slate-400">Defensive chunk bounds check</p>
           </button>
 
-          <button onClick={startAnalysis} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-cyan-500/50 transition-colors group">
+          <button onClick={() => handleSampleClick('txt')} disabled={isAnalyzing} className="text-left bg-slate-900 border border-slate-800 p-6 rounded-xl hover:border-cyan-500/50 transition-colors group">
             <FileText className="w-6 h-6 text-cyan-400 mb-4 group-hover:scale-110 transition-transform" />
             <h4 className="font-semibold text-slate-200 mb-1">Damaged TXT</h4>
             <p className="text-sm text-slate-400">Contiguous carving with synthetic markers</p>

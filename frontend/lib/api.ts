@@ -24,6 +24,63 @@ export function determinePriority(category: ArtifactCategory, previewText: strin
   return 'LOW';
 }
 
+export function parseAiSummary(rawSummary: any, artifact?: any): AIExplanation | null {
+  if (!rawSummary) return null;
+  if (typeof rawSummary === 'object' && rawSummary.summary) return rawSummary as AIExplanation;
+  try {
+    const parsed = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
+    if (parsed.details && Array.isArray(parsed.details)) {
+      return {
+        summary: parsed.summary || '',
+        details: parsed.details,
+      };
+    }
+    return {
+      summary: parsed.summary || 'Summary unavailable.',
+      details: [
+        parsed.what_was_recovered || 'N/A',
+        parsed.what_is_verified || 'N/A',
+        parsed.what_is_missing || 'N/A',
+        parsed.status_reasoning || 'N/A',
+        parsed.priority_reasoning || 'N/A'
+      ]
+    };
+  } catch (e) {
+    console.error("Failed to parse AI summary", e);
+    return null;
+  }
+}
+
+export function normalizeBackendArtifact(raw: any): Artifact {
+  const isPassed = (raw.provenance?.validation_status || raw.validation_status) === 'PASSED';
+  return {
+    id: raw.artifact_id || raw.id,
+    filename: raw.metadata?.filename || raw.filename || `${raw.artifact_id || 'artifact'}.${raw.format || 'bin'}`,
+    mime_type: raw.mime_type || (raw.format === 'csv' ? 'text/csv' : raw.format === 'png' ? 'image/png' : 'text/plain'),
+    category: raw.category || 'DOCUMENT',
+    priority: raw.priority || 'LOW',
+    confidence_score: raw.confidence_score ?? 0,
+    status: raw.status || 'UNRECOVERABLE',
+    verified_bytes: raw.provenance?.verified_bytes ?? raw.verified_bytes ?? 0,
+    reconstructed_bytes: raw.provenance?.reconstructed_bytes ?? raw.reconstructed_bytes ?? 0,
+    missing_bytes: raw.provenance?.missing_bytes ?? raw.missing_bytes ?? 0,
+    reconstruction_method: (raw.provenance?.reconstruction_method === 'BIFRAGMENT' ? 'BIFRAGMENT_GAP' : raw.provenance?.reconstruction_method) || raw.reconstruction_method || 'NONE',
+    validation_status: raw.provenance?.validation_status || raw.validation_status || 'PASSED',
+    confidence_breakdown: raw.score_breakdown || raw.confidence_breakdown || {
+      header_validity: 0, footer_validity: 0, structural_validation: 0, size_plausibility: 0, reconstruction_integrity: 0, total: 0
+    },
+    preview_text: raw.content_preview ?? raw.preview_text ?? '',
+    ai_summary: parseAiSummary(raw.ai_summary, raw) || null,
+    validation: raw.validation || {
+      valid: isPassed,
+      checks: [{ name: "Backend Validation", detail: `Status: ${raw.provenance?.validation_status || 'UNKNOWN'}`, passed: isPassed }]
+    },
+    fragments: raw.fragments || [
+      { id: "frag_default", start_offset: raw.metadata?.offset || 0, end_offset: (raw.metadata?.offset || 0) + (raw.size_bytes || 0), type: "VERIFIED" }
+    ]
+  } as Artifact;
+}
+
 export const mockArtifacts: Artifact[] = [
   {
     // Scenario 4: Bifragment gap ledger.csv
@@ -302,10 +359,18 @@ export async function createCase(name?: string): Promise<Case> {
       const res = await fetch(`${API_BASE}/api/cases`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: name || "Automated Case" }),
         cache: 'no-store'
       });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const raw = await res.json();
+        return {
+          id: raw.case_id || raw.id,
+          name: raw.name,
+          description: raw.description,
+          artifacts: (raw.artifacts || []).map(normalizeBackendArtifact)
+        };
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock createCase", e);
     }
@@ -342,7 +407,15 @@ export async function analyzeCase(caseId: string): Promise<Case> {
         method: 'POST',
         cache: 'no-store'
       });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const raw = await res.json();
+        return {
+          id: raw.case_id || raw.id,
+          name: raw.name || mockCase.name,
+          description: raw.description || mockCase.description,
+          artifacts: (raw.artifacts || []).map(normalizeBackendArtifact)
+        };
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock analyzeCase", e);
     }
@@ -360,7 +433,15 @@ export async function fetchCase(caseId = 'case_001'): Promise<Case> {
   if (!USE_MOCK) {
     try {
       const res = await fetch(`${API_BASE}/api/cases/${caseId}`, { cache: 'no-store' });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const raw = await res.json();
+        return {
+          id: raw.case_id || raw.id,
+          name: raw.name,
+          description: raw.description,
+          artifacts: (raw.artifacts || []).map(normalizeBackendArtifact)
+        };
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock fetchCase", e);
     }
@@ -372,7 +453,10 @@ export async function fetchArtifacts(caseId = 'case_001'): Promise<Artifact[]> {
   if (!USE_MOCK) {
     try {
       const res = await fetch(`${API_BASE}/api/cases/${caseId}/artifacts`, { cache: 'no-store' });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const rawArray = await res.json();
+        return rawArray.map(normalizeBackendArtifact);
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock fetchArtifacts", e);
     }
@@ -384,7 +468,10 @@ export async function fetchArtifactById(artifactId: string): Promise<Artifact> {
   if (!USE_MOCK) {
     try {
       const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, { cache: 'no-store' });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const raw = await res.json();
+        return normalizeBackendArtifact(raw);
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock fetchArtifactById", e);
     }
@@ -407,7 +494,10 @@ export async function fetchArtifactExplanation(artifactId: string): Promise<AIEx
         method: 'POST',
         cache: 'no-store'
       });
-      if (res.ok) explanation = await res.json();
+      if (res.ok) {
+        const rawData = await res.json();
+        explanation = parseAiSummary(rawData);
+      }
     } catch (e) {
       console.warn("Backend unreachable, falling back to mock fetchArtifactExplanation", e);
     }
