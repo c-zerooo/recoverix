@@ -86,3 +86,22 @@ export interface GroundTruth {
   image_filename: string;
   expected_artifacts: GroundTruthExpectedArtifact[];
 }
+
+export interface SingleFileRecoveryResult {
+  file_id: string;
+  original_filename: string;
+  recovered_filename: string;
+  format: string;
+  status: RecoveryStatus;
+  confidence_score: number;
+  verified_bytes: number;
+  reconstructed_bytes: number;
+  missing_bytes: number;
+  reconstruction_method: string;
+  validation_status: string;
+  is_downloadable: boolean;
+  download_url: string;
+  content_preview?: string | null;
+  score_breakdown: ConfidenceBreakdown;
+  validation_details?: Record<string, any>;
+}
