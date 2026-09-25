@@ -349,15 +349,17 @@ def test_contract_null_placeholders():
     analyze_res = client.post(f"/api/cases/{case_id}/analyze")
     art = analyze_res.json()["artifacts"][0]
 
-    # Explicit null placeholders required by Recoverix API contract
+    # Stage 9-11 implemented: fields are now populated deterministically
     assert "category" in art
-    assert art["category"] is None
+    assert art["category"] is not None
+    assert art["category"] in ("SYSTEM_TRACE", "DATABASE_LOG", "PHOTO_MEDIA", "BINARY_ARCHIVE", "DOCUMENT")
 
     assert "priority" in art
-    assert art["priority"] is None
+    assert art["priority"] is not None
+    assert art["priority"] in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 
     assert "ai_summary" in art
-    assert art["ai_summary"] is None
+    assert art["ai_summary"] is not None
 
 
 # ── 21. Shared API Contract: Score Breakdown Schema ──────────────────
@@ -494,8 +496,8 @@ def test_corrupted_status_preservation_and_serialization():
 
 # ── 26. Integration Contract & Schema Completeness Verification ──────
 
-def test_integration_contract_schema_and_unimplemented_explain():
-    """Verify that ArtifactResponse contains all deterministic fields and explain is unmapped."""
+def test_integration_contract_schema_and_explain():
+    """Verify that ArtifactResponse contains all deterministic fields and explain endpoint works."""
     create_res = client.post("/api/cases", json={"name": "Contract Check Case"})
     case_id = create_res.json()["case_id"]
 
@@ -519,13 +521,23 @@ def test_integration_contract_schema_and_unimplemented_explain():
     for field in required_fields:
         assert field in art_json, f"Missing required field: {field}"
 
-    # Verify classification/AI fields remain nullable (Member 2 domain)
-    assert art_json["category"] is None
-    assert art_json["priority"] is None
-    assert art_json["ai_summary"] is None
+    # Stage 9-11 implemented: classification fields are now populated
+    assert art_json["category"] in ("SYSTEM_TRACE", "DATABASE_LOG", "PHOTO_MEDIA", "BINARY_ARCHIVE", "DOCUMENT")
+    assert art_json["priority"] in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+    assert art_json["ai_summary"] is not None
 
-    # Verify explain endpoint is not implemented (belongs to Member 2)
+    # Verify explain endpoint returns valid explanation
     explain_res = client.post(f"/api/artifacts/{artifact_id}/explain")
-    assert explain_res.status_code in (404, 405)
+    assert explain_res.status_code == 200
+    explain_json = explain_res.json()
+    assert "summary" in explain_json
+    assert "details" in explain_json
+    assert isinstance(explain_json["details"], list)
+    assert len(explain_json["details"]) > 0
+
+    # Verify cache-first: second call returns same result
+    explain_res_2 = client.post(f"/api/artifacts/{artifact_id}/explain")
+    assert explain_res_2.status_code == 200
+    assert explain_res_2.json() == explain_json
 
 

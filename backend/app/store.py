@@ -145,6 +145,24 @@ class InMemoryStore:
             self._cases[artifact.case_id]["artifact_count"] = len(self._case_artifacts[artifact.case_id])
             return artifact
 
+    def update_artifact(self, artifact_id: str, **fields: object) -> Optional[ArtifactResponse]:
+        """Update specific fields on a stored artifact.
+
+        Only updates fields that exist on ArtifactResponse. Returns the
+        updated artifact, or None if artifact_id is not found.
+        """
+        with self._lock:
+            existing = self._artifacts.get(artifact_id)
+            if existing is None:
+                return None
+            data = existing.model_dump()
+            for key, value in fields.items():
+                if key in data:
+                    data[key] = value
+            updated = ArtifactResponse(**data)
+            self._artifacts[artifact_id] = updated
+            return updated
+
     def get_artifact(self, artifact_id: str) -> Optional[ArtifactResponse]:
         """Get an artifact by artifact_id."""
         with self._lock:

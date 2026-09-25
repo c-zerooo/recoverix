@@ -4,6 +4,7 @@ analysis.py — Analysis API router orchestrating deterministic Tasks 1–7 reco
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, status
@@ -20,6 +21,9 @@ from backend.app.recovery.carver import carve_candidate, RecoveredArtifact
 from backend.app.recovery.validators import validate_txt, validate_csv
 from backend.app.recovery.bifragment import reconstruct_bifragment
 from backend.app.scoring.confidence import evaluate_artifact_confidence
+from backend.app.scoring.classifier import classify_artifact
+from backend.app.scoring.priority import determine_priority
+from backend.app.scoring.explainer import generate_explanation
 
 
 class AnalysisSummaryResponse(BaseModel):
@@ -75,8 +79,41 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
             if carved_artifact.recovered_bytes:
                 preview = carved_artifact.recovered_bytes[:200].decode("utf-8", errors="replace")
 
+            # Stage 9-11: Deterministic classification, priority, and explanation
+            category = classify_artifact(fmt=carved_artifact.format, content_preview=preview)
+            priority = determine_priority(
+                category=category,
+                content_preview=preview,
+                status=eval_res.status.value,
+                confidence_score=eval_res.score_breakdown.total,
+            )
+            art_id = f"art_{uuid.uuid4().hex[:8]}"
+            explanation = generate_explanation(
+                artifact_id=art_id,
+                fmt=carved_artifact.format,
+                category=category,
+                priority=priority,
+                status=eval_res.status.value,
+                confidence_score=eval_res.score_breakdown.total,
+                score_breakdown={
+                    "header_validity": eval_res.score_breakdown.header_validity,
+                    "footer_validity": eval_res.score_breakdown.footer_validity,
+                    "structural_validation": eval_res.score_breakdown.structural_validation,
+                    "size_plausibility": eval_res.score_breakdown.size_plausibility,
+                    "reconstruction_integrity": eval_res.score_breakdown.reconstruction_integrity,
+                },
+                provenance={
+                    "verified_bytes": eval_res.provenance.verified_bytes,
+                    "reconstructed_bytes": eval_res.provenance.reconstructed_bytes,
+                    "missing_bytes": eval_res.provenance.missing_bytes,
+                    "reconstruction_method": eval_res.provenance.reconstruction_method,
+                    "validation_status": eval_res.provenance.validation_status,
+                },
+                content_preview=preview,
+            )
+
             art_resp = ArtifactResponse(
-                artifact_id=f"art_{uuid.uuid4().hex[:8]}",
+                artifact_id=art_id,
                 case_id=case_id,
                 format=carved_artifact.format,
                 size_bytes=carved_artifact.recovered_byte_count,
@@ -97,9 +134,9 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                     reconstruction_method=eval_res.provenance.reconstruction_method,
                     validation_status=eval_res.provenance.validation_status,
                 ),
-                category=None,
-                priority=None,
-                ai_summary=None,
+                category=category,
+                priority=priority,
+                ai_summary=json.dumps(explanation),
                 content_preview=preview,
                 metadata={
                     "offset": carved_artifact.source_offset,
@@ -136,8 +173,46 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                         reconstruction_result=recon_res,
                     )
 
+                    # Build content preview from fragment A bytes
+                    bifrag_preview = None
+                    if recon_res.fragment_a_bytes:
+                        bifrag_preview = recon_res.fragment_a_bytes[:200].decode("utf-8", errors="replace")
+
+                    # Stage 9-11: Deterministic classification, priority, and explanation
+                    category = classify_artifact(fmt=recon_res.format, content_preview=bifrag_preview)
+                    priority = determine_priority(
+                        category=category,
+                        content_preview=bifrag_preview,
+                        status=eval_res.status.value,
+                        confidence_score=eval_res.score_breakdown.total,
+                    )
+                    art_id = f"art_{uuid.uuid4().hex[:8]}"
+                    explanation = generate_explanation(
+                        artifact_id=art_id,
+                        fmt=recon_res.format,
+                        category=category,
+                        priority=priority,
+                        status=eval_res.status.value,
+                        confidence_score=eval_res.score_breakdown.total,
+                        score_breakdown={
+                            "header_validity": eval_res.score_breakdown.header_validity,
+                            "footer_validity": eval_res.score_breakdown.footer_validity,
+                            "structural_validation": eval_res.score_breakdown.structural_validation,
+                            "size_plausibility": eval_res.score_breakdown.size_plausibility,
+                            "reconstruction_integrity": eval_res.score_breakdown.reconstruction_integrity,
+                        },
+                        provenance={
+                            "verified_bytes": eval_res.provenance.verified_bytes,
+                            "reconstructed_bytes": eval_res.provenance.reconstructed_bytes,
+                            "missing_bytes": eval_res.provenance.missing_bytes,
+                            "reconstruction_method": eval_res.provenance.reconstruction_method,
+                            "validation_status": eval_res.provenance.validation_status,
+                        },
+                        content_preview=bifrag_preview,
+                    )
+
                     art_resp = ArtifactResponse(
-                        artifact_id=f"art_{uuid.uuid4().hex[:8]}",
+                        artifact_id=art_id,
                         case_id=case_id,
                         format=recon_res.format,
                         size_bytes=len(recon_res.fragment_a_bytes) + len(recon_res.fragment_b_bytes),
@@ -158,10 +233,10 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                             reconstruction_method=eval_res.provenance.reconstruction_method,
                             validation_status=eval_res.provenance.validation_status,
                         ),
-                        category=None,
-                        priority=None,
-                        ai_summary=None,
-                        content_preview=None,
+                        category=category,
+                        priority=priority,
+                        ai_summary=json.dumps(explanation),
+                        content_preview=bifrag_preview,
                         metadata={
                             "reconstruction_method": recon_res.reconstruction_method,
                             "gap_size": recon_res.gap_size,
@@ -182,8 +257,43 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                 val_res = validator(raw_frag)
                 eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=raw_frag)
 
+                fallback_preview = raw_frag[:200].decode("utf-8", errors="replace")
+
+                # Stage 9-11: Deterministic classification, priority, and explanation
+                category = classify_artifact(fmt=candidate.format, content_preview=fallback_preview)
+                priority = determine_priority(
+                    category=category,
+                    content_preview=fallback_preview,
+                    status=eval_res.status.value,
+                    confidence_score=eval_res.score_breakdown.total,
+                )
+                art_id = f"art_{uuid.uuid4().hex[:8]}"
+                explanation = generate_explanation(
+                    artifact_id=art_id,
+                    fmt=candidate.format,
+                    category=category,
+                    priority=priority,
+                    status=eval_res.status.value,
+                    confidence_score=eval_res.score_breakdown.total,
+                    score_breakdown={
+                        "header_validity": eval_res.score_breakdown.header_validity,
+                        "footer_validity": eval_res.score_breakdown.footer_validity,
+                        "structural_validation": eval_res.score_breakdown.structural_validation,
+                        "size_plausibility": eval_res.score_breakdown.size_plausibility,
+                        "reconstruction_integrity": eval_res.score_breakdown.reconstruction_integrity,
+                    },
+                    provenance={
+                        "verified_bytes": eval_res.provenance.verified_bytes,
+                        "reconstructed_bytes": eval_res.provenance.reconstructed_bytes,
+                        "missing_bytes": eval_res.provenance.missing_bytes,
+                        "reconstruction_method": eval_res.provenance.reconstruction_method,
+                        "validation_status": eval_res.provenance.validation_status,
+                    },
+                    content_preview=fallback_preview,
+                )
+
                 art_resp = ArtifactResponse(
-                    artifact_id=f"art_{uuid.uuid4().hex[:8]}",
+                    artifact_id=art_id,
                     case_id=case_id,
                     format=candidate.format,
                     size_bytes=len(raw_frag),
@@ -204,10 +314,10 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                         reconstruction_method=eval_res.provenance.reconstruction_method,
                         validation_status=eval_res.provenance.validation_status,
                     ),
-                    category=None,
-                    priority=None,
-                    ai_summary=None,
-                    content_preview=raw_frag[:200].decode("utf-8", errors="replace"),
+                    category=category,
+                    priority=priority,
+                    ai_summary=json.dumps(explanation),
+                    content_preview=fallback_preview,
                     metadata={
                         "offset": candidate.offset,
                         "candidate_id": candidate.candidate_id,
