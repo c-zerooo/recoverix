@@ -5,7 +5,10 @@ Recoverix — Data Models Package
 from __future__ import annotations
 
 from backend.app.models.validation import ValidationResult
-from backend.app.models.reconstruction import BifragmentReconstructionResult
+from backend.app.models.reconstruction import (
+    BifragmentReconstructionResult,
+    ReconstructionResult,
+)
 from backend.app.models.confidence import (
     RecoveryStatus,
     ConfidenceBreakdown,
@@ -22,10 +25,19 @@ from backend.app.models.artifact import (
     ArtifactProvenanceSchema,
     ArtifactResponse,
 )
+from backend.app.models.recovery_run import (
+    FragmentRelationship,
+    Fragment,
+    DamageRegion,
+    ReconstructionStep,
+    PipelineEvent,
+    RecoveryRun,
+)
 
 __all__ = [
     "ValidationResult",
     "BifragmentReconstructionResult",
+    "ReconstructionResult",
     "RecoveryStatus",
     "ConfidenceBreakdown",
     "ArtifactProvenance",
@@ -36,4 +48,10 @@ __all__ = [
     "ConfidenceBreakdownSchema",
     "ArtifactProvenanceSchema",
     "ArtifactResponse",
+    "FragmentRelationship",
+    "Fragment",
+    "DamageRegion",
+    "ReconstructionStep",
+    "PipelineEvent",
+    "RecoveryRun",
 ]

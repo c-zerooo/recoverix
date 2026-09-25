@@ -5,7 +5,7 @@ artifacts.py — Artifacts API router for case artifact listing and detail retri
 from __future__ import annotations
 
 from typing import List
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Response
 
 from backend.app.models.artifact import ArtifactResponse
 from backend.app.store import store
@@ -91,5 +91,28 @@ def explain_artifact_route(artifact_id: str) -> Dict[str, Any]:
     # Store ai_summary onto artifact to populate next fetch
     # This requires mutating the stored response model directly or providing an update method.
     artifact.ai_summary = explanation
-    
+
     return explanation
+
+
+@router.get("/artifacts/{artifact_id}/download", status_code=status.HTTP_200_OK)
+def download_artifact(artifact_id: str) -> Response:
+    """Download raw byte buffer of a recovered case artifact."""
+    artifact = store.get_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact '{artifact_id}' not found",
+        )
+
+    content = store.get_artifact_bytes(artifact_id)
+    if content is None:
+        preview = artifact.content_preview or ""
+        content = preview.encode("utf-8")
+
+    filename = f"recovered_artifact_{artifact_id}.{artifact.format}"
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

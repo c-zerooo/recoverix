@@ -3,7 +3,7 @@ scanner.py — Deterministic candidate-fragment scanner.
 
 Accepts raw evidence bytes and scans for registered format signatures,
 producing a list of Candidate objects representing detected artifact
-regions.
+regions across all 7 supported formats (TXT, CSV, JSON, XML, PNG, JPEG, PDF).
 
 The scanner:
   - scans left to right, one byte at a time
@@ -13,16 +13,26 @@ The scanner:
   - produces deterministic results for identical input
   - does not crash on malformed or truncated evidence
 
-For TXT/CSV (synthetic boundary markers):
+For TXT/CSV/JSON/XML (synthetic boundary markers):
   - detects [SYNTHETIC_ARTIFACT_START]
   - locates the corresponding [SYNTHETIC_ARTIFACT_END]
-  - differentiates TXT from CSV by content heuristics
+  - differentiates TXT vs CSV vs JSON vs XML by content heuristics
   - records the candidate region including both markers
 
 For PNG:
-  - detects the 8-byte PNG magic signature
+  - detects the 8-byte PNG magic signature (\x89PNG\r\n\x1a\n)
   - records the candidate start
-  - leaves estimated_end_offset as None (no full PNG parser)
+
+For JPEG:
+  - detects the 2-byte JPEG SOI signature (\xFF\xD8)
+  - searches for EOI marker (\xFF\xD9) to calculate estimated end offset
+
+For PDF:
+  - detects the PDF header signature (%PDF-)
+  - searches for trailer marker (%%EOF) to calculate estimated end offset
+
+For direct XML:
+  - detects '<?xml' header signature
 
 This module does NOT perform recovery, carving, reconstruction,
 confidence scoring, classification, or AI work.
@@ -30,6 +40,8 @@ confidence scoring, classification, or AI work.
 
 from __future__ import annotations
 
+import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -37,6 +49,11 @@ from backend.app.recovery.signatures import (
     SYNTHETIC_START_MARKER,
     SYNTHETIC_END_MARKER,
     PNG_SIGNATURE,
+    JPEG_SOI,
+    JPEG_EOI,
+    PDF_HEADER_SIGNATURE,
+    PDF_TRAILER_SIGNATURE,
+    XML_HEADER_SIGNATURE,
 )
 
 
@@ -46,9 +63,9 @@ class Candidate:
 
     Attributes:
         candidate_id: Unique sequential identifier (``"cand-0"``, ``"cand-1"``, …).
-        format: Detected format (``"txt"``, ``"csv"``, ``"png"``).
+        format: Detected format (``"txt"``, ``"csv"``, ``"json"``, ``"xml"``, ``"png"``, ``"jpeg"``, ``"pdf"``).
         mime_type: MIME type string.
-        category: Human-readable category (``"text"``, ``"image"``).
+        category: Human-readable category (``"text"``, ``"structured"``, ``"image"``, ``"document"``).
         offset: Byte offset of the detected header in the evidence.
         detected_header_length: Length of the header/signature that was matched.
         estimated_end_offset: Byte offset one past the last byte of the
@@ -66,45 +83,83 @@ class Candidate:
     detection_method: str
 
 
-# ── Content heuristic for TXT vs CSV ────────────────────────────────
+# ── Content heuristic for Synthetic Marker Payloads ──────────────────
 
-def _classify_synthetic_content(body: bytes) -> str:
-    """Classify the content between synthetic markers as TXT or CSV.
+def _classify_synthetic_content(body: bytes) -> tuple[str, str, str]:
+    """Classify the content between synthetic markers as TXT, CSV, JSON, XML, PNG, JPEG, or PDF.
 
-    Heuristic:
-      - If the first non-empty line after the start marker contains a
-        comma, the artifact is classified as CSV.
-      - Otherwise, it is classified as TXT.
-
-    This mirrors the generator's convention:
-      - ``_make_txt`` writes ``filename: {name}`` as the first body line.
-      - ``_make_csv`` writes comma-separated rows directly.
+    Returns:
+        Tuple of (format, mime_type, category).
     """
-    try:
-        text = body.decode("utf-8", errors="replace")
-    except Exception:
-        return "txt"  # default fallback
+    # First check explicit FMT:<format>; header prefix in synthetic marker bodies
+    if body.startswith(b"FMT:"):
+        end_fmt = body.find(b";")
+        if end_fmt != -1:
+            tag = body[4:end_fmt].decode("utf-8", errors="ignore").lower()
+            if tag == "png":
+                return ("png", "image/png", "image")
+            elif tag in ("jpeg", "jpg"):
+                return ("jpeg", "image/jpeg", "image")
+            elif tag == "pdf":
+                return ("pdf", "application/pdf", "document")
+            elif tag == "txt":
+                return ("txt", "text/plain", "text")
+            elif tag == "csv":
+                return ("csv", "text/csv", "text")
+            elif tag == "json":
+                return ("json", "application/json", "structured")
+            elif tag == "xml":
+                return ("xml", "application/xml", "structured")
 
+    # Check magic byte signatures embedded in synthetic body
+    if PNG_SIGNATURE in body:
+        return ("png", "image/png", "image")
+    if JPEG_SOI in body:
+        return ("jpeg", "image/jpeg", "image")
+    if PDF_HEADER_SIGNATURE in body:
+        return ("pdf", "application/pdf", "document")
+
+    try:
+        text = body.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ("txt", "text/plain", "text")
+
+    if not text:
+        return ("txt", "text/plain", "text")
+
+    # Check JSON
+    if text.startswith(("{", "[")):
+        try:
+            json.loads(text)
+            return ("json", "application/json", "structured")
+        except Exception:
+            pass
+
+    # Check XML
+    if text.startswith(("<?xml", "<")):
+        try:
+            ET.fromstring(text)
+            return ("xml", "application/xml", "structured")
+        except Exception:
+            if text.startswith("<?xml"):
+                return ("xml", "application/xml", "structured")
+
+    # Check CSV
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         if "," in stripped:
-            return "csv"
-        return "txt"
+            return ("csv", "text/csv", "text")
+        break
 
-    return "txt"
+    return ("txt", "text/plain", "text")
 
 
 # ── Scanner ─────────────────────────────────────────────────────────
 
 def scan_evidence(data: bytes) -> List[Candidate]:
-    """Scan *data* for registered format signatures.
-
-    Scans left to right, recording every match.  Synthetic boundary
-    markers produce one candidate per matched START/END pair (or
-    START-to-end-of-data if no END is found).  PNG magic bytes produce
-    a candidate with ``estimated_end_offset=None``.
+    """Scan *data* for registered format signatures across 7 formats.
 
     Args:
         data: Raw evidence bytes.  Never mutated.
@@ -125,23 +180,42 @@ def scan_evidence(data: bytes) -> List[Candidate]:
     # ── Pass 2: scan for PNG magic bytes ────────────────────────
     _scan_png(data, evidence_len, candidates)
 
-    # Sort by offset for deterministic ordering, then by candidate_id
-    # for stability when two candidates share an offset.
-    candidates.sort(key=lambda c: (c.offset, c.candidate_id))
+    # ── Pass 3: scan for JPEG SOI bytes ─────────────────────────
+    _scan_jpeg(data, evidence_len, candidates)
+
+    # ── Pass 4: scan for PDF header bytes ────────────────────────
+    _scan_pdf(data, evidence_len, candidates)
+
+    # ── Pass 5: scan for direct XML headers ─────────────────────
+    _scan_xml(data, evidence_len, candidates)
+
+    # Deduplicate candidates sharing exact same offset and format
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        key = (c.offset, c.format)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(c)
+
+    # Sort by offset for deterministic ordering, then by format
+    unique_candidates.sort(key=lambda c: (c.offset, c.format))
 
     # Assign sequential candidate IDs after sorting.
     final: List[Candidate] = []
-    for idx, c in enumerate(candidates):
-        final.append(Candidate(
-            candidate_id=f"cand-{idx}",
-            format=c.format,
-            mime_type=c.mime_type,
-            category=c.category,
-            offset=c.offset,
-            detected_header_length=c.detected_header_length,
-            estimated_end_offset=c.estimated_end_offset,
-            detection_method=c.detection_method,
-        ))
+    for idx, c in enumerate(unique_candidates):
+        final.append(
+            Candidate(
+                candidate_id=f"cand-{idx}",
+                format=c.format,
+                mime_type=c.mime_type,
+                category=c.category,
+                offset=c.offset,
+                detected_header_length=c.detected_header_length,
+                estimated_end_offset=c.estimated_end_offset,
+                detection_method=c.detection_method,
+            )
+        )
 
     return final
 
@@ -151,15 +225,7 @@ def _scan_synthetic(
     evidence_len: int,
     candidates: List[Candidate],
 ) -> None:
-    """Find all synthetic boundary-marker pairs in *data*.
-
-    For each [SYNTHETIC_ARTIFACT_START]:
-      - search for the next [SYNTHETIC_ARTIFACT_END]
-      - if found, the candidate spans from the start marker through the
-        end marker (inclusive of marker bytes)
-      - if not found, estimated_end_offset is None (truncated marker)
-      - content between the markers is used to classify TXT vs CSV
-    """
+    """Find all synthetic boundary-marker pairs in *data*."""
     start_marker = SYNTHETIC_START_MARKER
     end_marker = SYNTHETIC_END_MARKER
     start_len = len(start_marker)
@@ -168,40 +234,35 @@ def _scan_synthetic(
     search_from = 0
 
     while search_from <= evidence_len - start_len:
-        # Find the next start marker.
         pos = data.find(start_marker, search_from)
         if pos == -1:
             break
 
-        # Look for the corresponding end marker after this start marker.
         body_start = pos + start_len
         end_pos = data.find(end_marker, body_start)
 
         if end_pos != -1:
-            # End marker found — candidate spans [pos, end_pos + end_len).
             estimated_end = end_pos + end_len
             body = data[body_start:end_pos]
         else:
-            # Truncated: no end marker found.
             estimated_end = None
             body = data[body_start:]
 
-        # Classify TXT vs CSV based on content.
-        fmt = _classify_synthetic_content(body)
-        mime_type = "text/plain" if fmt == "txt" else "text/csv"
+        fmt, mime_type, category = _classify_synthetic_content(body)
 
-        candidates.append(Candidate(
-            candidate_id="",  # assigned later
-            format=fmt,
-            mime_type=mime_type,
-            category="text",
-            offset=pos,
-            detected_header_length=start_len,
-            estimated_end_offset=estimated_end,
-            detection_method="synthetic_boundary",
-        ))
+        candidates.append(
+            Candidate(
+                candidate_id="",
+                format=fmt,
+                mime_type=mime_type,
+                category=category,
+                offset=pos,
+                detected_header_length=start_len,
+                estimated_end_offset=estimated_end,
+                detection_method="synthetic_boundary",
+            )
+        )
 
-        # Advance past this start marker to find more.
         search_from = pos + start_len
 
 
@@ -210,12 +271,7 @@ def _scan_png(
     evidence_len: int,
     candidates: List[Candidate],
 ) -> None:
-    """Find all PNG magic-byte signatures in *data*.
-
-    Each match produces a candidate with estimated_end_offset=None
-    because determining the PNG end requires a full chunk parser,
-    which is outside the scanner's scope.
-    """
+    """Find all PNG magic-byte signatures in *data*."""
     sig = PNG_SIGNATURE
     sig_len = len(sig)
 
@@ -226,16 +282,131 @@ def _scan_png(
         if pos == -1:
             break
 
-        candidates.append(Candidate(
-            candidate_id="",  # assigned later
-            format="png",
-            mime_type="image/png",
-            category="image",
-            offset=pos,
-            detected_header_length=sig_len,
-            estimated_end_offset=None,
-            detection_method="magic_bytes",
-        ))
+        iend_pos = data.find(b"IEND", pos + sig_len)
+        estimated_end = (iend_pos + 8) if iend_pos != -1 else None
 
-        # Advance past this signature to find more.
+        candidates.append(
+            Candidate(
+                candidate_id="",
+                format="png",
+                mime_type="image/png",
+                category="image",
+                offset=pos,
+                detected_header_length=sig_len,
+                estimated_end_offset=estimated_end,
+                detection_method="magic_bytes",
+            )
+        )
+
+        search_from = pos + sig_len
+
+
+def _scan_jpeg(
+    data: bytes,
+    evidence_len: int,
+    candidates: List[Candidate],
+) -> None:
+    """Find all JPEG SOI signatures in *data*."""
+    sig = JPEG_SOI
+    sig_len = len(sig)
+
+    search_from = 0
+
+    while search_from <= evidence_len - sig_len:
+        pos = data.find(sig, search_from)
+        if pos == -1:
+            break
+
+        # Check for EOI marker after SOI to estimate end
+        eoi_pos = data.find(JPEG_EOI, pos + sig_len)
+        estimated_end = (eoi_pos + len(JPEG_EOI)) if eoi_pos != -1 else None
+
+        candidates.append(
+            Candidate(
+                candidate_id="",
+                format="jpeg",
+                mime_type="image/jpeg",
+                category="image",
+                offset=pos,
+                detected_header_length=sig_len,
+                estimated_end_offset=estimated_end,
+                detection_method="magic_bytes",
+            )
+        )
+
+        search_from = pos + sig_len
+
+
+def _scan_pdf(
+    data: bytes,
+    evidence_len: int,
+    candidates: List[Candidate],
+) -> None:
+    """Find all PDF header signatures in *data*."""
+    sig = PDF_HEADER_SIGNATURE
+    sig_len = len(sig)
+
+    search_from = 0
+
+    while search_from <= evidence_len - sig_len:
+        pos = data.find(sig, search_from)
+        if pos == -1:
+            break
+
+        # Check for %%EOF marker after header to estimate end
+        eof_pos = data.rfind(PDF_TRAILER_SIGNATURE, pos + sig_len)
+        if eof_pos != -1:
+            estimated_end = eof_pos + len(PDF_TRAILER_SIGNATURE)
+            if estimated_end + 1 <= evidence_len and data[estimated_end:estimated_end + 2] in (b"\r\n", b"\n\r"):
+                estimated_end += 2
+            elif estimated_end < evidence_len and data[estimated_end:estimated_end + 1] in (b"\n", b"\r"):
+                estimated_end += 1
+        else:
+            estimated_end = None
+
+        candidates.append(
+            Candidate(
+                candidate_id="",
+                format="pdf",
+                mime_type="application/pdf",
+                category="document",
+                offset=pos,
+                detected_header_length=sig_len,
+                estimated_end_offset=estimated_end,
+                detection_method="magic_bytes",
+            )
+        )
+
+        search_from = pos + sig_len
+
+
+def _scan_xml(
+    data: bytes,
+    evidence_len: int,
+    candidates: List[Candidate],
+) -> None:
+    """Find direct XML header signatures in *data*."""
+    sig = XML_HEADER_SIGNATURE
+    sig_len = len(sig)
+
+    search_from = 0
+
+    while search_from <= evidence_len - sig_len:
+        pos = data.find(sig, search_from)
+        if pos == -1:
+            break
+
+        candidates.append(
+            Candidate(
+                candidate_id="",
+                format="xml",
+                mime_type="application/xml",
+                category="structured",
+                offset=pos,
+                detected_header_length=sig_len,
+                estimated_end_offset=None,
+                detection_method="magic_bytes",
+            )
+        )
+
         search_from = pos + sig_len

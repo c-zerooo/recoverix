@@ -172,8 +172,8 @@ def test_invalid_artifact_scoring_and_status():
 def test_exact_status_threshold_boundaries():
     # 85 without reconstructed bytes -> FULLY_RECOVERED
     assert classify_recovery_status(85, reconstructed_bytes=0, missing_bytes=0) == RecoveryStatus.FULLY_RECOVERED
-    # 85 WITH missing_bytes (reconstructed_bytes=0) -> FULLY_RECOVERED (missing_bytes alone does NOT downgrade lower/other statuses)
-    assert classify_recovery_status(85, reconstructed_bytes=0, missing_bytes=10) == RecoveryStatus.FULLY_RECOVERED
+    # 85 WITH missing_bytes -> PARTIALLY_RECOVERED (Override: missing_bytes > 0 cannot be FULLY_RECOVERED)
+    assert classify_recovery_status(85, reconstructed_bytes=0, missing_bytes=10) == RecoveryStatus.PARTIALLY_RECOVERED
     # 85 WITH reconstructed_bytes -> PARTIALLY_RECOVERED (Override)
     assert classify_recovery_status(85, reconstructed_bytes=5, missing_bytes=0) == RecoveryStatus.PARTIALLY_RECOVERED
 
@@ -220,7 +220,7 @@ def test_reconstruction_integrity_scoring():
     assert b_ok.reconstruction_integrity == 15
 
     # Failed bifragment reconstruction -> 0 points
-    recon_fail = reconstruct_bifragment(b"bad_a", b"bad_b", validator=validate_txt, min_gap=1, max_gap=5)
+    recon_fail = reconstruct_bifragment(b"\xff\xfe\xfd", b"\xfc\xfb\xfa", validator=validate_txt, min_gap=1, max_gap=5)
     val_fail = ValidationResult(valid=False, format="txt")
     b_fail = calculate_confidence(val_fail, reconstruction_result=recon_fail)
     assert b_fail.reconstruction_integrity == 0

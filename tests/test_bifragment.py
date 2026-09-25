@@ -109,9 +109,9 @@ def test_smallest_valid_gap_selection():
 
 
 def test_no_valid_gap_fails_safely():
-    # Fragments that cannot form a valid artifact together within [1, 10]
-    frag_a = b"invalid_a"
-    frag_b = b"invalid_b"
+    # Fragments with invalid UTF-8 bytes that cannot form a valid TXT artifact together
+    frag_a = b"\xff\xfe\xfd"
+    frag_b = b"\xfc\xfb\xfa"
     result = reconstruct_bifragment(frag_a, frag_b, validator=validate_txt, min_gap=1, max_gap=10)
 
     assert result.success is False

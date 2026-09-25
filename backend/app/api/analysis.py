@@ -108,6 +108,7 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                 },
             )
             store.add_artifact(art_resp)
+            store.store_artifact_bytes(art_resp.artifact_id, carved_artifact.recovered_bytes)
             recovered_artifacts.append(art_resp)
             processed_candidates.add(candidate.candidate_id)
 
@@ -170,6 +171,8 @@ def analyze_case(case_id: str) -> AnalysisSummaryResponse:
                         },
                     )
                     store.add_artifact(art_resp)
+                    recon_bytes = recon_res.fragment_a_bytes + recon_res.fragment_b_bytes
+                    store.store_artifact_bytes(art_resp.artifact_id, recon_bytes)
                     recovered_artifacts.append(art_resp)
                     processed_candidates.add(candidate.candidate_id)
                     processed_candidates.add(other_cand.candidate_id)

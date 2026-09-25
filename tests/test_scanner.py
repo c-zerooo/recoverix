@@ -381,28 +381,36 @@ def test_signature_is_frozen():
 
 def test_registry_contents():
     formats = {s.format for s in SIGNATURES}
-    assert formats == {"txt", "csv", "png"}
+    assert formats == {"txt", "csv", "json", "xml", "png", "jpeg", "pdf"}
 
 
 # ── 24. Content heuristic — TXT classification ─────────────────────
 
 def test_classify_txt():
     body = b"filename: test.txt\ntype: log"
-    assert _classify_synthetic_content(body) == "txt"
+    fmt, mime, cat = _classify_synthetic_content(body)
+    assert fmt == "txt"
+    assert mime == "text/plain"
+    assert cat == "text"
 
 
 # ── 25. Content heuristic — CSV classification ─────────────────────
 
 def test_classify_csv():
     body = b"col1,col2,col3\na,b,c"
-    assert _classify_synthetic_content(body) == "csv"
+    fmt, mime, cat = _classify_synthetic_content(body)
+    assert fmt == "csv"
+    assert mime == "text/csv"
+    assert cat == "text"
 
 
 # ── 26. Content heuristic — empty body defaults to TXT ─────────────
 
 def test_classify_empty_body():
-    assert _classify_synthetic_content(b"") == "txt"
-    assert _classify_synthetic_content(b"\n\n") == "txt"
+    fmt1, _, _ = _classify_synthetic_content(b"")
+    assert fmt1 == "txt"
+    fmt2, _, _ = _classify_synthetic_content(b"\n\n")
+    assert fmt2 == "txt"
 
 
 # ── 27. Huge irrelevant evidence ───────────────────────────────────
