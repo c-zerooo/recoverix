@@ -384,6 +384,10 @@ export default function InvestigationPage({
             fragments={fragments}
             damageRegions={damageRegions}
             reconstructionSteps={reconstructionSteps}
+            status={result.status}
+            format={result.format}
+            reconstructionMethod={result.reconstruction_method}
+            validationStatus={result.validation_status}
           />
         </section>
 

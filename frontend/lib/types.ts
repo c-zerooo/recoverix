@@ -107,6 +107,12 @@ export interface ForensicFragment {
   reconstructed_bytes: number;
   missing_bytes: number;
   validation_status: string;
+  relationships?: {
+    source_fragment_id: string;
+    target_fragment_id: string;
+    relationship_type: string;
+    details?: Record<string, any>;
+  }[];
 }
 
 export interface DamageRegion {
