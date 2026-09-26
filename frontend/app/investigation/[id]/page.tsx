@@ -20,6 +20,7 @@ import { fetchRecoveredFile, fetchRecoveryRun } from "@/lib/api";
 import { SingleFileRecoveryResult, InvestigationContext } from "@/lib/types";
 import { FragmentGraph } from "@/components/investigation/FragmentGraph";
 import { ByteEvidenceMap } from "@/components/investigation/ByteEvidenceMap";
+import { AIEvidenceAnalyst } from "@/components/investigation/AIEvidenceAnalyst";
 
 export default function InvestigationPage({
   params,
@@ -35,7 +36,7 @@ export default function InvestigationPage({
   const [copiedPreview, setCopiedPreview] = useState(false);
   const [showRubricDetails, setShowRubricDetails] = useState(false);
   const [activeSection, setActiveSection] = useState<
-    "overview" | "fragments" | "map" | "preview" | "provenance"
+    "overview" | "fragments" | "map" | "preview" | "provenance" | "analyst"
   >("overview");
 
   useEffect(() => {
@@ -254,6 +255,7 @@ export default function InvestigationPage({
               { id: "map", label: "Evidence Map" },
               { id: "preview", label: "Recovery" },
               { id: "provenance", label: "Provenance" },
+              { id: "analyst", label: "AI Analyst" },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -659,6 +661,11 @@ export default function InvestigationPage({
             </div>
           </div>
         </section>
+
+        {/* ========================================================================= */}
+        {/* SECTION 8 — AI EVIDENCE ANALYST (ASSISTANT & INTERPRETATION LAYER) */}
+        {/* ========================================================================= */}
+        <AIEvidenceAnalyst fileId={fileId} evidenceFacts={result} />
 
         {/* Bottom Investigation Footer */}
         <div className="text-center pt-4 pb-12">

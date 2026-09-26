@@ -26,24 +26,27 @@ export function determinePriority(category: ArtifactCategory, previewText: strin
 
 export function parseAiSummary(rawSummary: any, artifact?: any): AIExplanation | null {
   if (!rawSummary) return null;
-  if (typeof rawSummary === 'object' && rawSummary.summary) return rawSummary as AIExplanation;
   try {
     const parsed = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
-    if (parsed.details && Array.isArray(parsed.details)) {
-      return {
-        summary: parsed.summary || '',
-        details: parsed.details,
-      };
-    }
+    const details = Array.isArray(parsed.details) ? parsed.details : [
+      parsed.what_was_recovered || 'N/A',
+      parsed.what_is_verified || 'N/A',
+      parsed.what_is_missing || 'N/A',
+      parsed.status_reasoning || 'N/A',
+      parsed.priority_reasoning || 'N/A'
+    ];
     return {
       summary: parsed.summary || 'Summary unavailable.',
-      details: [
-        parsed.what_was_recovered || 'N/A',
-        parsed.what_is_verified || 'N/A',
-        parsed.what_is_missing || 'N/A',
-        parsed.status_reasoning || 'N/A',
-        parsed.priority_reasoning || 'N/A'
-      ]
+      details: details,
+      cached: Boolean(parsed.cached),
+      available: parsed.available !== false,
+      assessment: parsed.assessment,
+      priority: parsed.priority,
+      why_it_matters: parsed.why_it_matters,
+      recovery_limitation: parsed.recovery_limitation,
+      recommended_next_step: parsed.recommended_next_step,
+      source: parsed.source,
+      facts: parsed.facts,
     };
   } catch (e) {
     console.error("Failed to parse AI summary", e);
@@ -707,6 +710,67 @@ export async function fetchRecoveryRuns(): Promise<any[]> {
     console.warn("Failed to fetch recovery runs", e);
   }
   return [];
+}
+
+export async function fetchInvestigationExplanation(
+  fileId: string,
+  evidenceFacts?: Record<string, any>,
+  forceRefresh = false
+): Promise<AIExplanation> {
+  if (!forceRefresh && explanationCache.has(fileId)) {
+    return { ...explanationCache.get(fileId)!, cached: true };
+  }
+
+  // 1. Try /api/recover-file/${fileId}/explain
+  try {
+    const res = await fetch(`${API_BASE}/api/recover-file/${fileId}/explain`, {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      const rawData = await res.json();
+      const explanation = parseAiSummary(rawData);
+      if (explanation) {
+        explanation.cached = Boolean(rawData.cached);
+        explanationCache.set(fileId, explanation);
+        return explanation;
+      }
+    }
+  } catch (e) {
+    console.warn("recover-file explain endpoint failed, trying artifacts route", e);
+  }
+
+  // 2. Try /api/artifacts/${fileId}/explain
+  try {
+    const res = await fetch(`${API_BASE}/api/artifacts/${fileId}/explain`, {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      const rawData = await res.json();
+      const explanation = parseAiSummary(rawData);
+      if (explanation) {
+        explanation.cached = Boolean(rawData.cached);
+        explanationCache.set(fileId, explanation);
+        return explanation;
+      }
+    }
+  } catch (e) {
+    console.warn("artifacts explain endpoint failed", e);
+  }
+
+  // If live backend is unreachable or unavailable, return safe unavailable status (never fake output)
+  return {
+    summary: "AI interpretation could not be generated.",
+    details: ["Deterministic recovery results remain available."],
+    available: false,
+    assessment: "Deterministic recovery results remain available. AI interpretation could not be generated.",
+    priority: "MEDIUM",
+    why_it_matters: "Backend AI service was unreachable or returned an error.",
+    recovery_limitation: "AI interpretation could not be retrieved. Deterministic evidence is unaffected.",
+    recommended_next_step: "Rely on deterministic findings and verify evidence byte offsets manually.",
+    cached: false
+  };
 }
 
 

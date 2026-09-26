@@ -20,6 +20,7 @@ from backend.app.recovery.validators import validate_artifact, VALIDATORS
 from backend.app.recovery.bifragment import reconstruct_bifragment
 from backend.app.scoring.confidence import evaluate_artifact_confidence
 from backend.app.recovery.tracer import execute_traced_recovery
+from backend.app.scoring.explainer import explain_artifact
 
 
 class FileRecoveryResponse(BaseModel):
@@ -176,4 +177,26 @@ def download_recovered_file(file_id: str) -> Response:
         content=content,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{rec_name}"'},
+    )
+
+
+@router.post("/recover-file/{file_id}/explain", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+@router.post("/recover/file/{file_id}/explain", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+def explain_recovered_file(file_id: str) -> Dict[str, Any]:
+    """Generate or retrieve a cached grounded AI explanation for a single recovered file."""
+    meta = store.get_recovered_file_metadata(file_id)
+    if meta is not None:
+        return explain_artifact(file_id, meta)
+
+    run = store.get_recovery_run(file_id) or store.get_recovery_run_by_artifact(file_id)
+    if run is not None:
+        return explain_artifact(file_id, run)
+
+    artifact = store.get_artifact(file_id)
+    if artifact is not None:
+        return explain_artifact(file_id, artifact)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Recovered file '{file_id}' not found",
     )

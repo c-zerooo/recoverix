@@ -44,6 +44,14 @@ export interface AIExplanation {
   summary: string;
   details: string[];
   cached?: boolean;
+  available?: boolean;
+  assessment?: string;
+  priority?: PriorityLevel;
+  why_it_matters?: string;
+  recovery_limitation?: string;
+  recommended_next_step?: string;
+  source?: string;
+  facts?: Record<string, any>;
 }
 
 export interface Artifact {

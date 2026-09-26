@@ -81,18 +81,26 @@ def get_artifact_detail(artifact_id: str) -> ArtifactResponse:
 def explain_artifact_route(artifact_id: str) -> Dict[str, Any]:
     """Generate or retrieve a cached AI explanation for an artifact."""
     artifact = store.get_artifact(artifact_id)
-    if artifact is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Artifact '{artifact_id}' not found",
-        )
-    explanation = explain_artifact(artifact_id, artifact)
-    
-    # Store ai_summary onto artifact to populate next fetch
-    # This requires mutating the stored response model directly or providing an update method.
-    artifact.ai_summary = explanation
+    if artifact is not None:
+        explanation = explain_artifact(artifact_id, artifact)
+        # Store ai_summary onto artifact to populate next fetch
+        artifact.ai_summary = explanation
+        return explanation
 
-    return explanation
+    # Check recovered file metadata
+    file_meta = store.get_recovered_file_metadata(artifact_id)
+    if file_meta is not None:
+        return explain_artifact(artifact_id, file_meta)
+
+    # Check recovery runs
+    run = store.get_recovery_run(artifact_id) or store.get_recovery_run_by_artifact(artifact_id)
+    if run is not None:
+        return explain_artifact(artifact_id, run)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Artifact '{artifact_id}' not found",
+    )
 
 
 @router.get("/artifacts/{artifact_id}/download", status_code=status.HTTP_200_OK)
