@@ -1,7 +1,7 @@
 import { Artifact, Case, AIExplanation, ArtifactCategory, PriorityLevel, SingleFileRecoveryResult } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
-const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK !== 'false';
+const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
 
 // Cache for AI Explanations to prevent redundant calls and enable instant live demos
 const explanationCache = new Map<string, AIExplanation>();
@@ -637,74 +637,77 @@ export async function fetchGroundTruth(caseId = 'case_001'): Promise<import('./t
 }
 
 export async function recoverSingleFile(file: File): Promise<SingleFileRecoveryResult> {
-  if (!USE_MOCK) {
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await fetch(`${API_BASE}/api/recover-file`, {
-        method: 'POST',
-        body: formData,
-        cache: 'no-store'
-      });
-      if (res.ok) {
-        const data = await res.json();
-        // Ensure absolute download_url if needed
-        if (data.download_url && data.download_url.startsWith('/')) {
-          data.download_url = `${API_BASE}${data.download_url}`;
-        }
-        return data;
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/api/recover-file`, {
+      method: 'POST',
+      body: formData,
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      // Ensure absolute download_url if needed
+      if (data.download_url && data.download_url.startsWith('/')) {
+        data.download_url = `${API_BASE}${data.download_url}`;
       }
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.detail || `Server returned ${res.status}`);
-    } catch (e: any) {
-      if (e.message && (e.message.includes('EMPTY_FILE') || e.message.includes('FILE_TOO_LARGE'))) {
-        throw e;
-      }
-      // In live mode the displayed V/R/M must come from the real forensic engine.
-      // Never substitute a fabricated "fully recovered" result for a failed call.
-      if (!USE_MOCK) {
-        throw new Error(
-          `Recovery backend unavailable at ${API_BASE}. No result is shown because verified, ` +
-          `reconstructed and missing byte counts must come from the live forensic engine.`
-        );
-      }
-      console.warn("Backend unreachable during single file recovery, utilizing client fallback", e);
+      return data;
     }
+    const errData = await res.json().catch(() => ({}));
+    const message = typeof errData.detail === 'string' ? errData.detail : (errData.detail ? JSON.stringify(errData.detail) : `Server returned ${res.status}`);
+    throw new Error(message);
+  } catch (e: any) {
+    if (e.message && !e.message.startsWith('TypeError: Failed to fetch') && !e.message.includes('fetch failed')) {
+      throw e;
+    }
+    throw new Error(
+      `Recovery backend unavailable at ${API_BASE}. No result is shown because verified, ` +
+      `reconstructed and missing byte counts must come from the live forensic engine.`
+    );
   }
-
-  // Fallback / mock recovery for single file mode
-  const fileId = `rec_file_${Math.random().toString(36).substring(2, 10)}`;
-  const recFilename = `recovered_${file.name}`;
-  const ext = file.name.includes('.') ? file.name.split('.').pop()?.toLowerCase() || 'txt' : 'txt';
-
-  return {
-    file_id: fileId,
-    original_filename: file.name,
-    recovered_filename: recFilename,
-    format: ext || 'txt',
-    status: 'FULLY_RECOVERED',
-    confidence_score: 95.0,
-    verified_bytes: file.size,
-    reconstructed_bytes: 0,
-    missing_bytes: 0,
-    reconstruction_method: 'DIRECT_FORMAT_VALIDATION',
-    validation_status: 'PASSED',
-    is_downloadable: true,
-    download_url: `${API_BASE}/api/recover-file/${fileId}/download`,
-    content_preview: `[Recovered Content Preview for ${file.name}]`,
-    score_breakdown: {
-      header_validity: 20.0,
-      footer_validity: 20.0,
-      structural_validation: 30.0,
-      size_plausibility: 12.5,
-      reconstruction_integrity: 12.5,
-      total: 95.0
-    },
-    validation_details: { format: ext, status: "PASSED" }
-  };
 }
 
 export function getArtifactDownloadUrl(artifactId: string): string {
   return `${API_BASE}/api/artifacts/${artifactId}/download`;
 }
+
+export async function fetchRecoveryRun(runId: string): Promise<any | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/recovery-runs/${runId}`, { cache: 'no-store' });
+    if (res.ok) return await res.json();
+  } catch (e) {
+    console.warn("Failed to fetch recovery run", e);
+  }
+  return null;
+}
+
+export async function fetchRecoveredFile(fileId: string): Promise<SingleFileRecoveryResult | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/recover-file/${fileId}`, { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.download_url && data.download_url.startsWith('/')) {
+        data.download_url = `${API_BASE}${data.download_url}`;
+      }
+      return data;
+    }
+  } catch (e) {
+    console.warn("Failed to fetch recovered file metadata", e);
+  }
+  return null;
+}
+
+export async function fetchRecoveryRuns(): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE}/api/recovery-runs`, { cache: 'no-store' });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.warn("Failed to fetch recovery runs", e);
+  }
+  return [];
+}
+
+
 

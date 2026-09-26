@@ -301,12 +301,22 @@ def _scan_png(
         search_from = pos + sig_len
 
 
+# Valid JPEG first marker bytes immediately following \xFF\xD8\xFF
+VALID_JPEG_FIRST_MARKERS = frozenset({
+    0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7,
+    0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
+    0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
+    0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+    0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xFE,
+})
+
+
 def _scan_jpeg(
     data: bytes,
     evidence_len: int,
     candidates: List[Candidate],
 ) -> None:
-    """Find all JPEG SOI signatures in *data*."""
+    """Find all JPEG SOI signatures in *data*, requiring a valid following marker."""
     sig = JPEG_SOI
     sig_len = len(sig)
 
@@ -317,24 +327,27 @@ def _scan_jpeg(
         if pos == -1:
             break
 
-        # Check for EOI marker after SOI to estimate end
-        eoi_pos = data.find(JPEG_EOI, pos + sig_len)
-        estimated_end = (eoi_pos + len(JPEG_EOI)) if eoi_pos != -1 else None
+        # A valid JPEG SOI must be immediately followed by 0xFF and a valid marker byte
+        if pos + 3 < evidence_len and data[pos + 2] == 0xFF and data[pos + 3] in VALID_JPEG_FIRST_MARKERS:
+            # Check for EOI marker after SOI to estimate end
+            eoi_pos = data.find(JPEG_EOI, pos + sig_len)
+            estimated_end = (eoi_pos + len(JPEG_EOI)) if eoi_pos != -1 else None
 
-        candidates.append(
-            Candidate(
-                candidate_id="",
-                format="jpeg",
-                mime_type="image/jpeg",
-                category="image",
-                offset=pos,
-                detected_header_length=sig_len,
-                estimated_end_offset=estimated_end,
-                detection_method="magic_bytes",
+            candidates.append(
+                Candidate(
+                    candidate_id="",
+                    format="jpeg",
+                    mime_type="image/jpeg",
+                    category="image",
+                    offset=pos,
+                    detected_header_length=sig_len + 2,
+                    estimated_end_offset=estimated_end,
+                    detection_method="magic_bytes",
+                )
             )
-        )
 
-        search_from = pos + sig_len
+        search_from = pos + 1
+
 
 
 def _scan_pdf(

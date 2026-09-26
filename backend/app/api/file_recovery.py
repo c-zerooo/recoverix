@@ -9,7 +9,7 @@ and producing downloadable recovered byte buffers.
 from __future__ import annotations
 
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Response
 from pydantic import BaseModel
 
@@ -42,6 +42,10 @@ class FileRecoveryResponse(BaseModel):
     content_preview: Optional[str] = None
     score_breakdown: Dict[str, float]
     validation_details: Dict[str, Any]
+    fragments: Optional[List[Dict[str, Any]]] = None
+    damage_regions: Optional[List[Dict[str, Any]]] = None
+    reconstruction_steps: Optional[List[Dict[str, Any]]] = None
+    total_input_bytes: Optional[int] = None
 
 
 router = APIRouter(tags=["file_recovery"])
@@ -130,11 +134,28 @@ async def recover_single_file(file: UploadFile = File(...)) -> FileRecoveryRespo
         "content_preview": content_preview,
         "score_breakdown": score_breakdown,
         "validation_details": val_details,
+        "fragments": [f.model_dump() for f in recovery_run.fragments],
+        "damage_regions": [d.model_dump() for d in recovery_run.damage_regions],
+        "reconstruction_steps": [s.model_dump() for s in recovery_run.reconstruction_steps],
+        "total_input_bytes": recovery_run.total_input_bytes,
     }
 
     store.store_recovered_file(file_id, meta_dict, (bytes.fromhex(recovery_run.output.get("recovered_bytes", "")) if recovery_run.output else b""))
 
     return FileRecoveryResponse(**meta_dict)
+
+
+@router.get("/recover-file/{file_id}", response_model=FileRecoveryResponse, status_code=status.HTTP_200_OK)
+@router.get("/recover/file/{file_id}", response_model=FileRecoveryResponse, status_code=status.HTTP_200_OK)
+def get_recovered_file_metadata(file_id: str) -> FileRecoveryResponse:
+    """Retrieve metadata and real forensic fragments of a previously recovered file."""
+    meta = store.get_recovered_file_metadata(file_id)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recovered file '{file_id}' not found",
+        )
+    return FileRecoveryResponse(**meta)
 
 
 @router.get("/recover-file/{file_id}/download", status_code=status.HTTP_200_OK)

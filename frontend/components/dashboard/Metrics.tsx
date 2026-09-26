@@ -7,25 +7,25 @@ export function Metrics({ artifacts }: { artifacts: Artifact[] }) {
   const highPriority = artifacts.filter(a => a.priority === "CRITICAL" || a.priority === "HIGH").length;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-      <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-5">
-        <p className="text-slate-400 text-sm font-medium mb-1">Total Artifacts</p>
-        <p className="text-3xl font-bold text-sky-400">{total}</p>
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 font-mono">
+      <div className="bg-[#0B0F19] border border-[#1E293B] rounded-xl p-5">
+        <p className="text-slate-400 text-xs uppercase tracking-wider mb-1">Total Artifacts</p>
+        <p className="text-3xl font-bold text-white">{total}</p>
       </div>
 
-      <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-5">
-        <p className="text-slate-400 text-sm font-medium mb-1">Fully Recovered</p>
-        <p className="text-3xl font-bold text-sky-400">{recovered}</p>
+      <div className="bg-[#0B0F19] border border-[#1E293B] rounded-xl p-5">
+        <p className="text-slate-400 text-xs uppercase tracking-wider mb-1">Fully Recovered</p>
+        <p className="text-3xl font-bold text-emerald-400">{recovered}</p>
       </div>
 
-      <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-5">
-        <p className="text-slate-400 text-sm font-medium mb-1">Partial Recovery</p>
-        <p className="text-3xl font-bold text-pink-500">{partial}</p>
+      <div className="bg-[#0B0F19] border border-[#1E293B] rounded-xl p-5">
+        <p className="text-slate-400 text-xs uppercase tracking-wider mb-1">Partial Recovery</p>
+        <p className="text-3xl font-bold text-amber-400">{partial}</p>
       </div>
 
-      <div className="bg-[#131B2E] border border-[#1E293B] rounded-xl p-5">
-        <p className="text-slate-400 text-sm font-medium mb-1">High / Critical Priority</p>
-        <p className="text-3xl font-bold text-pink-500">{highPriority}</p>
+      <div className="bg-[#0B0F19] border border-[#1E293B] rounded-xl p-5">
+        <p className="text-slate-400 text-xs uppercase tracking-wider mb-1">High / Critical</p>
+        <p className="text-3xl font-bold text-rose-400">{highPriority}</p>
       </div>
     </div>
   );

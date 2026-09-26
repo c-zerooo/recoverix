@@ -87,8 +87,52 @@ export interface GroundTruth {
   expected_artifacts: GroundTruthExpectedArtifact[];
 }
 
+export interface ForensicFragment {
+  fragment_id: string;
+  offset: number;
+  length: number;
+  end_offset: number;
+  status: string;
+  source: string;
+  format: string;
+  verified_bytes: number;
+  reconstructed_bytes: number;
+  missing_bytes: number;
+  validation_status: string;
+}
+
+export interface DamageRegion {
+  region_id: string;
+  start_offset: number;
+  end_offset: number;
+  length: number;
+  type: string;
+  status: string;
+}
+
+export interface ReconstructionStep {
+  step_id: string;
+  method: string;
+  gap_start?: number;
+  gap_end?: number;
+  gap_size?: number;
+  result: string;
+  verified_bytes: number;
+  reconstructed_bytes: number;
+  missing_bytes: number;
+}
+
+export interface InvestigationContext {
+  case_name: string;
+  investigator: string;
+  evidence_description: string;
+  notes: string;
+  created_at: string;
+}
+
 export interface SingleFileRecoveryResult {
   file_id: string;
+  run_id?: string;
   original_filename: string;
   recovered_filename: string;
   format: string;
@@ -104,4 +148,10 @@ export interface SingleFileRecoveryResult {
   content_preview?: string | null;
   score_breakdown: ConfidenceBreakdown;
   validation_details?: Record<string, any>;
+  fragments?: ForensicFragment[];
+  damage_regions?: DamageRegion[];
+  reconstruction_steps?: ReconstructionStep[];
+  total_input_bytes?: number;
+  context?: InvestigationContext;
 }
+

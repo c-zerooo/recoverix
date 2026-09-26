@@ -28,7 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
-      <body className="font-sans antialiased bg-[#0B0F1A] text-slate-100 min-h-full flex flex-col">
+      <body className="font-sans antialiased bg-[#F8FAFC] text-slate-900 min-h-full flex flex-col selection:bg-emerald-500/20 selection:text-emerald-950">
         <TopNav />
         {children}
       </body>

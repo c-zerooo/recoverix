@@ -34,7 +34,12 @@ from backend.app.recovery.reconstruction import reconstruct_artifact, reconstruc
 from backend.app.recovery.fragment_detector import detect_text_fragments
 from backend.app.recovery.relationship import select_fragment_pairs
 from backend.app.scoring.confidence import evaluate_artifact_confidence
-from backend.app.recovery.signatures import SYNTHETIC_START_MARKER
+from backend.app.recovery.signatures import (
+    SYNTHETIC_START_MARKER,
+    PNG_SIGNATURE,
+    PDF_HEADER_SIGNATURE,
+    PDF_TRAILER_SIGNATURE,
+)
 
 
 def execute_traced_recovery(
@@ -86,6 +91,49 @@ def execute_traced_recovery(
 
     candidates: List[Candidate] = scan_evidence(content)
 
+    # Resolve filename extension hint
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    ext_fmt_map = {
+        "txt": "txt",
+        "csv": "csv",
+        "json": "json",
+        "xml": "xml",
+        "png": "png",
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "pdf": "pdf",
+    }
+    ext_fmt = ext_fmt_map.get(ext)
+
+    # Filter out spurious candidates when unambiguous evidence signatures or hints exist
+    if b"%PDF-" in content or ext_fmt == "pdf":
+        pdf_cands = [c for c in candidates if c.format == "pdf"]
+        if pdf_cands:
+            candidates = pdf_cands
+    elif PNG_SIGNATURE in content or ext_fmt == "png":
+        png_cands = [c for c in candidates if c.format == "png"]
+        if png_cands:
+            candidates = png_cands
+    elif ext_fmt in ("txt", "csv", "json") and not any(c.detection_method == "synthetic_boundary" for c in candidates):
+        matching_cands = [c for c in candidates if c.format == ext_fmt]
+        if matching_cands:
+            candidates = matching_cands
+        else:
+            candidates = []
+
+    def _rank_candidate(c: Candidate) -> tuple[int, int, int, int, int]:
+        ext_match = 1 if (ext_fmt and c.format == ext_fmt) else 0
+        method_score = {
+            "synthetic_boundary": 100,
+            "magic_bytes": 80,
+        }.get(c.detection_method, 50)
+        sig_len = c.detected_header_length
+        has_end = 1 if c.estimated_end_offset is not None else 0
+        return (ext_match, method_score, sig_len, has_end, -c.offset)
+
+    if candidates:
+        candidates.sort(key=_rank_candidate, reverse=True)
+
     for cand in candidates:
         emit_event(
             "FORMAT_DETECTED",
@@ -117,6 +165,7 @@ def execute_traced_recovery(
         cand = candidates[0]
         fmt = cand.format
         validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
+
 
         # Scenario 1: Candidate with known end offset (Contiguous carved artifact)
         if cand.estimated_end_offset is not None:
@@ -230,9 +279,10 @@ def execute_traced_recovery(
             except Exception as e:
                 val_details_dict = {"error": str(e)}
 
-        # Scenario 2: Multiple candidates without end offset (Bifragment recovery)
-        elif len(candidates) >= 2:
+        # Scenario 2: Multiple candidates without end offset of same format (Bifragment recovery)
+        elif len(candidates) >= 2 and candidates[0].format == candidates[1].format:
             cand2 = candidates[1]
+
 
             raw_between = content[cand.offset:cand2.offset]
             frag_a_bytes = raw_between.rstrip(b"\x00")
@@ -452,7 +502,103 @@ def execute_traced_recovery(
                 raw_bytes = content[cand.offset:]
                 val_initial = validator(raw_bytes)
 
-                if not val_initial.valid and b"xref" not in raw_bytes or any("xref" in e.lower() for e in val_initial.errors):
+                # Check for shuffled PDF fragments (trailer %%EOF placed before header %PDF-)
+                shuffled_recovered = False
+                if cand.offset > 0 and b"%%EOF" in content[:cand.offset]:
+                    candidate_unshuffled = content[cand.offset:] + content[:cand.offset]
+                    val_unshuffled = validator(candidate_unshuffled)
+                    if not val_unshuffled.valid and (b"xref" not in candidate_unshuffled or any("xref" in e.lower() for e in val_unshuffled.errors)):
+                        rebuilt_unshuffled, xref_ok = reconstruct_pdf_xref(candidate_unshuffled)
+                        if xref_ok:
+                            candidate_unshuffled = rebuilt_unshuffled
+                            val_unshuffled = validator(candidate_unshuffled)
+
+                    if val_unshuffled.valid:
+                        shuffled_recovered = True
+                        emit_event(
+                            "RECONSTRUCTION_STARTED",
+                            "Detected shuffled PDF fragments; executing deterministic un-shuffle reconstruction",
+                        )
+                        emit_event(
+                            "RECONSTRUCTION_COMPLETED",
+                            "Shuffled PDF fragments reordered and structurally validated",
+                        )
+                        header_frag_len = len(content) - cand.offset
+                        trailer_frag_len = cand.offset
+
+                        f_head = Fragment(
+                            fragment_id="frag-0",
+                            offset=cand.offset,
+                            length=header_frag_len,
+                            end_offset=len(content),
+                            status="VERIFIED",
+                            source="shuffled_header",
+                            format="pdf",
+                            verified_bytes=header_frag_len,
+                            reconstructed_bytes=0,
+                            missing_bytes=0,
+                            validation_status="PASSED",
+                        )
+                        f_tail = Fragment(
+                            fragment_id="frag-1",
+                            offset=0,
+                            length=trailer_frag_len,
+                            end_offset=cand.offset,
+                            status="VERIFIED",
+                            source="shuffled_trailer",
+                            format="pdf",
+                            verified_bytes=trailer_frag_len,
+                            reconstructed_bytes=0,
+                            missing_bytes=0,
+                            validation_status="PASSED",
+                        )
+                        rel = FragmentRelationship(
+                            source_fragment_id="frag-0",
+                            target_fragment_id="frag-1",
+                            relationship_type="SHUFFLED_SEQUENCE",
+                            details={"unshuffle_offset": cand.offset},
+                        )
+                        f_head = f_head.model_copy(update={"relationships": [rel]})
+                        fragments.clear()
+                        fragments.extend([f_head, f_tail])
+
+                        step0 = ReconstructionStep(
+                            step_id="step-0",
+                            method="FRAGMENT_UNSHUFFLE",
+                            input_fragment_ids=["frag-0", "frag-1"],
+                            gap_start=None,
+                            gap_end=None,
+                            gap_size=None,
+                            result="SUCCESS",
+                            verified_bytes=len(content),
+                            reconstructed_bytes=0,
+                            missing_bytes=0,
+                            validation_status="PASSED",
+                            confidence=100.0,
+                        )
+                        reconstruction_steps.append(step0)
+
+                        eval_res = evaluate_artifact_confidence(
+                            validation_result=val_unshuffled,
+                            artifact=candidate_unshuffled,
+                            actual_verified_bytes=len(content),
+                            actual_reconstructed_bytes=0,
+                            actual_missing_bytes=0,
+                        )
+                        status_val = eval_res.status.value
+                        ver_bytes = eval_res.provenance.verified_bytes
+                        rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+                        miss_bytes = eval_res.provenance.missing_bytes
+                        total_input_bytes = len(content)
+                        score_breakdown_dict = asdict(eval_res.score_breakdown)
+                        val_details_dict = asdict(val_unshuffled)
+                        prov_dict = asdict(eval_res.provenance)
+                        prov_dict["evidence_size"] = len(content)
+                        prov_dict["reconstruction_method"] = "FRAGMENT_UNSHUFFLE"
+                        output_dict = {"recovered_bytes": candidate_unshuffled.hex()}
+
+                if not shuffled_recovered and (not val_initial.valid and b"xref" not in raw_bytes or any("xref" in e.lower() for e in val_initial.errors)):
+
                     emit_event(
                         "DAMAGE_DETECTED",
                         "Detected damaged or missing PDF cross-reference table (xref)",

@@ -401,3 +401,49 @@ def test_corrupted_csv_api_returns_200_not_500():
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["verified_bytes"] + body["reconstructed_bytes"] + body["missing_bytes"] > 0
+
+
+def test_shuffled_pdf_recovery_via_tracer():
+    """Regression test for P0 bug: bms_fragmented_shuffled.pdf must be detected as PDF, not JPEG."""
+    from backend.app.recovery.tracer import execute_traced_recovery
+
+    pdf = build_minimal_pdf()
+    split = 120
+    frag1 = pdf[:split]
+    frag2 = pdf[split:]
+
+    # Include random \xff\xd8 byte sequence in fragment 2
+    frag2_with_noise = frag2.replace(b"0000000052", b"0000\xff\xd80052")
+    shuffled = frag2_with_noise + frag1
+
+    run = execute_traced_recovery(filename="bms_fragmented_shuffled.pdf", content=shuffled)
+    assert run.format == "pdf"
+    assert run.status == "FULLY_RECOVERED"
+    assert run.total_verified_bytes == len(shuffled)
+    assert run.total_reconstructed_bytes == 0
+    assert run.total_missing_bytes == 0
+    assert len(run.fragments) == 2
+    assert run.reconstruction_steps[0].method == "FRAGMENT_UNSHUFFLE"
+
+
+def test_shuffled_pdf_recovery_via_api():
+    """Regression test: uploading bms_fragmented_shuffled.pdf via API returns PDF FULLY_RECOVERED."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+
+    pdf = build_minimal_pdf()
+    split = 120
+    shuffled = pdf[split:] + pdf[:split]
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/recover-file",
+        files={"file": ("bms_fragmented_shuffled.pdf", shuffled, "application/pdf")},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "pdf"
+    assert data["status"] == "FULLY_RECOVERED"
+    assert data["confidence_score"] == 100.0
+    assert data["is_downloadable"] is True
+
