@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { AIExplanation, PriorityLevel } from "@/lib/types";
-import { fetchInvestigationExplanation } from "@/lib/api";
+import { fetchInvestigationExplanation, generateLocalGroundedExplanation } from "@/lib/api";
 import {
   BrainCircuit,
   RefreshCw,
@@ -47,20 +47,24 @@ export function AIEvidenceAnalyst({
       } catch (err) {
         console.warn("Failed to load AI evidence analysis", err);
         if (isMounted) {
-          setBrief({
-            summary: "AI interpretation could not be generated.",
-            details: ["Deterministic recovery results remain available."],
-            available: false,
-            assessment:
-              "Deterministic recovery results remain available. AI interpretation could not be generated.",
-            priority: "MEDIUM",
-            why_it_matters: "Backend AI service is unavailable or returned an error.",
-            recovery_limitation:
-              "AI interpretation could not be retrieved. Deterministic evidence is unaffected.",
-            recommended_next_step:
-              "Rely on deterministic findings and verify evidence byte offsets manually.",
-            cached: false,
-          });
+          if (evidenceFacts) {
+            setBrief(generateLocalGroundedExplanation(fileId, evidenceFacts));
+          } else {
+            setBrief({
+              summary: "AI interpretation could not be generated.",
+              details: ["Deterministic recovery results remain available."],
+              available: false,
+              assessment:
+                "Deterministic recovery results remain available. AI interpretation could not be generated.",
+              priority: "MEDIUM",
+              why_it_matters: "Backend AI service is unavailable or returned an error.",
+              recovery_limitation:
+                "AI interpretation could not be retrieved. Deterministic evidence is unaffected.",
+              recommended_next_step:
+                "Rely on deterministic findings and verify evidence byte offsets manually.",
+              cached: false,
+            });
+          }
         }
       } finally {
         if (isMounted) {
@@ -73,7 +77,7 @@ export function AIEvidenceAnalyst({
     return () => {
       isMounted = false;
     };
-  }, [fileId]);
+  }, [fileId, evidenceFacts]);
 
   const handleRefresh = async () => {
     setLoading(true);

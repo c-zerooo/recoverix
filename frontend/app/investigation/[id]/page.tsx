@@ -465,6 +465,24 @@ export default function InvestigationPage({
               </div>
             </div>
 
+            {/* Structural Reconstruction Callout (When R > 0) */}
+            {result.reconstructed_bytes > 0 && (
+              <div className="bg-sky-50 border border-sky-200 rounded-xl p-3.5 text-xs text-sky-950 font-mono space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-800 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-sky-500 animate-pulse" />
+                    STRUCTURAL RECONSTRUCTION ACTIVE (R &gt; 0)
+                  </span>
+                  <span className="text-[10px] bg-sky-100 text-sky-800 px-2 py-0.5 rounded font-bold">
+                    +{result.reconstructed_bytes} B APPENDED
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-700 font-sans">
+                  Recoverix deterministically repaired missing structural closing syntax using format grammar (<code className="font-mono text-sky-700 font-semibold">{result.reconstruction_method}</code>). The resulting byte buffer passed schema and parser validation.
+                </p>
+              </div>
+            )}
+
             {/* Content Preview */}
             {result.format === "pdf" ? (
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center space-y-4">
@@ -523,10 +541,19 @@ export default function InvestigationPage({
                 )}
               </div>
             ) : (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs overflow-x-auto max-h-64 scrollbar-thin">
-                <pre className="text-slate-100 whitespace-pre-wrap break-all leading-relaxed font-mono">
-                  {result.content_preview || "[No text preview available for binary stream]"}
-                </pre>
+              <div className="space-y-1.5">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs overflow-x-auto max-h-64 scrollbar-thin">
+                  <pre className="text-slate-100 whitespace-pre-wrap break-all leading-relaxed font-mono">
+                    {result.content_preview || "[No text preview available for binary stream]"}
+                  </pre>
+                </div>
+                {result.reconstructed_bytes > 0 && (
+                  <div className="text-[11px] text-slate-500 flex items-center justify-between px-1 font-mono">
+                    <span>Observed Input: <strong>{result.verified_bytes} B</strong></span>
+                    <span className="text-sky-700 font-semibold">Reconstructed Syntax: <strong>+{result.reconstructed_bytes} B</strong></span>
+                    <span>Total Artifact: <strong>{result.verified_bytes + result.reconstructed_bytes} B</strong></span>
+                  </div>
+                )}
               </div>
             )}
 

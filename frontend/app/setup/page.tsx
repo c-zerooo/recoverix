@@ -26,21 +26,32 @@ const ANALYSIS_STAGES = [
 ];
 
 // Benchmark fixtures from the Recoverix test suite
-const FIXTURE_INCIDENT_TXT =
+export const FIXTURE_INCIDENT_JSON =
+  '{"case":"IR-99","status":"active","tags":["malware","network"';
+
+export const FIXTURE_INCIDENT_TXT =
   "Subject: Incident Escalation\nTo: Security Operations Center\n\n" +
   "\x00".repeat(48) +
   "Action Taken: Contained infected workstation and quarantined IP.\n";
 
-const FIXTURE_CLEAN_TXT =
+export const FIXTURE_CLEAN_TXT =
   "Line 1: System initialization sequence completed.\n" +
   "Line 2: User admin authentication validated from 192.168.1.10.\n" +
   "Line 3: Routine audit log integrity verified across all nodes.\n";
 
-const FIXTURE_STAFF_CSV =
+export const FIXTURE_STAFF_CSV =
   "id,name,role,department\n" +
   "101,Alice Vance,Chief Investigator,Forensics\n" +
   "102,Bob Miller,Security Analyst,SOC\n" +
   "103,Charlie Chen,Malware Engineer,Reverse Eng\n";
+
+// Real 315-byte shuffled PDF binary (two real PDF fragments in reverse order)
+export const FIXTURE_SHUFFLED_PDF_B64 =
+  "ZG9iagozIDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgPj4KZW5kb2JqCnhyZWYKMCA0CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDUyIDAwMDAwIG4gCjAwMDAwMDAxMTggMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA0IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgoxNzIKJSVFT0YKJVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaW5kcyBbXSAvQ291bnQgMSAvS2lkcyBbMyAwIFJdID4+CmVu";
+
+// Real 39-byte valid JPEG binary (SOI/SOF0/SOS/EOI marker sequence)
+export const FIXTURE_PHOTO_JPEG_B64 =
+  "/9j/wAARCAAQABADAREAAhEBAxEB/9oADAMBAAIRAxEAPwAAf//Z";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -111,8 +122,32 @@ export default function SetupPage() {
 
   // Quick preset loaders for live evaluation
   const loadPreset = (name: string, content: string, caseLabel: string, desc: string) => {
-    const blob = new Blob([content], { type: name.endsWith(".csv") ? "text/csv" : "text/plain" });
-    const syntheticFile = new File([blob], name, { type: name.endsWith(".csv") ? "text/csv" : "text/plain" });
+    const mimeType = name.endsWith(".json")
+      ? "application/json"
+      : name.endsWith(".csv")
+      ? "text/csv"
+      : "text/plain";
+    const blob = new Blob([content], { type: mimeType });
+    const syntheticFile = new File([blob], name, { type: mimeType });
+    handleSelectFile(syntheticFile);
+    setCaseName(caseLabel);
+    setDescription(desc);
+  };
+
+  const loadBinaryPreset = (
+    name: string,
+    base64Data: string,
+    mimeType: string,
+    caseLabel: string,
+    desc: string
+  ) => {
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: mimeType });
+    const syntheticFile = new File([blob], name, { type: mimeType });
     handleSelectFile(syntheticFile);
     setCaseName(caseLabel);
     setDescription(desc);
@@ -329,10 +364,42 @@ export default function SetupPage() {
 
             {/* Quick Benchmark Fixtures (For live judge evaluation) */}
             <div className="pt-2 border-t border-slate-100 space-y-2 font-mono text-xs">
-              <div className="text-[11px] text-slate-500 uppercase tracking-wider">
-                Live Test Fixtures (Benchmark Data)
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-slate-500 uppercase tracking-wider font-semibold">
+                  Live Test Fixtures (Benchmark Data)
+                </span>
+                <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  Instant Load
+                </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {/* 1. HERO DEMO: incident_log.json (R > 0) */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    loadPreset(
+                      "incident_log.json",
+                      FIXTURE_INCIDENT_JSON,
+                      "Incident IR-99 — Evidence Tampering Log",
+                      "Truncated JSON log file; reconstructs missing closing delimiters (R=2B, V=61B)"
+                    )
+                  }
+                  className="p-3 rounded-xl bg-sky-50/60 hover:bg-sky-50 border border-sky-300 text-left transition-all shadow-2xs group relative"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sky-800 font-bold text-[11px] group-hover:text-sky-700">
+                      ★ incident_log.json
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded">
+                      R &gt; 0 RECONSTRUCTION
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-600 mt-1">
+                    Truncated JSON (61B) → Deterministic Closure (R=2B)
+                  </div>
+                </button>
+
+                {/* 2. GAP PRESERVATION: incident.txt (M > 0) */}
                 <button
                   type="button"
                   onClick={() =>
@@ -340,15 +407,52 @@ export default function SetupPage() {
                       "incident.txt",
                       FIXTURE_INCIDENT_TXT,
                       "Incident Response — Server Logs",
-                      "Fragmented server escalation log with an unobserved 48-byte gap"
+                      "Fragmented server escalation log with an unobserved 48-byte gap preserved as missing"
                     )
                   }
                   className="p-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-left transition-colors shadow-2xs group"
                 >
-                  <div className="text-emerald-700 font-bold text-[11px] group-hover:text-emerald-600">incident.txt</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Fragmented Gap (174B)</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-amber-800 font-bold text-[11px] group-hover:text-amber-700">
+                      incident.txt
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-amber-50 text-amber-800 px-1.5 py-0.5 rounded">
+                      PRESERVED GAP
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Bifragment Gap (174B) → Missing Preserved (M=48B)
+                  </div>
                 </button>
 
+                {/* 3. SHUFFLED PDF: bms_fragmented_shuffled.pdf */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    loadBinaryPreset(
+                      "bms_fragmented_shuffled.pdf",
+                      FIXTURE_SHUFFLED_PDF_B64,
+                      "application/pdf",
+                      "Black Matter Signature — Shuffled PDF Evidence",
+                      "Real PDF split into 2 fragments and reversed; deterministic unshuffle reconstructs valid document"
+                    )
+                  }
+                  className="p-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-left transition-colors shadow-2xs group"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-rose-800 font-bold text-[11px] group-hover:text-rose-700">
+                      bms_fragmented_shuffled.pdf
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-rose-50 text-rose-800 px-1.5 py-0.5 rounded">
+                      UNSHUFFLE
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    2 Shuffled Fragments (315B) → Full PDF Unshuffle
+                  </div>
+                </button>
+
+                {/* 4. INTACT BASELINE: clean.txt */}
                 <button
                   type="button"
                   onClick={() =>
@@ -356,15 +460,52 @@ export default function SetupPage() {
                       "clean.txt",
                       FIXTURE_CLEAN_TXT,
                       "Routine Audit — Clean Baseline",
-                      "Continuous unfragmented text evidence file"
+                      "Continuous unfragmented text evidence file (100% verified)"
                     )
                   }
                   className="p-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-left transition-colors shadow-2xs group"
                 >
-                  <div className="text-sky-700 font-bold text-[11px] group-hover:text-sky-600">clean.txt</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Intact Evidence (161B)</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-emerald-700 font-bold text-[11px] group-hover:text-emerald-600">
+                      clean.txt
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded">
+                      INTACT 100%
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Intact Plaintext (161B) → Full Exact Recovery
+                  </div>
                 </button>
 
+                {/* 5. VALID JPEG: photo_evidence.jpg */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    loadBinaryPreset(
+                      "photo_evidence.jpg",
+                      FIXTURE_PHOTO_JPEG_B64,
+                      "image/jpeg",
+                      "Surveillance Footage — Metadata Frame",
+                      "Raw JPEG byte stream; carver identifies SOI/EOI boundaries"
+                    )
+                  }
+                  className="p-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-left transition-colors shadow-2xs group"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-purple-800 font-bold text-[11px] group-hover:text-purple-700">
+                      photo_evidence.jpg
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-purple-50 text-purple-800 px-1.5 py-0.5 rounded">
+                      JPEG STREAM
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Valid JPEG Stream (39B) → SOI/EOI Validated
+                  </div>
+                </button>
+
+                {/* 6. STRUCTURED CSV: staff.csv */}
                 <button
                   type="button"
                   onClick={() =>
@@ -377,8 +518,17 @@ export default function SetupPage() {
                   }
                   className="p-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-left transition-colors shadow-2xs group"
                 >
-                  <div className="text-amber-700 font-bold text-[11px] group-hover:text-amber-600">staff.csv</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Delimited Records</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-800 font-bold text-[11px] group-hover:text-slate-700">
+                      staff.csv
+                    </span>
+                    <span className="text-[9px] uppercase font-bold bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded">
+                      DELIMITED
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Tabular Records (147B) → Column Schema Verified
+                  </div>
                 </button>
               </div>
             </div>

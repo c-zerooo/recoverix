@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Dict, Any, Optional, List
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Response
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Response, Body
 from pydantic import BaseModel
 
 from backend.app.store import store, MAX_EVIDENCE_SIZE
@@ -182,7 +182,7 @@ def download_recovered_file(file_id: str) -> Response:
 
 @router.post("/recover-file/{file_id}/explain", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 @router.post("/recover/file/{file_id}/explain", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-def explain_recovered_file(file_id: str) -> Dict[str, Any]:
+def explain_recovered_file(file_id: str, body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
     """Generate or retrieve a cached grounded AI explanation for a single recovered file."""
     meta = store.get_recovered_file_metadata(file_id)
     if meta is not None:
@@ -195,6 +195,9 @@ def explain_recovered_file(file_id: str) -> Dict[str, Any]:
     artifact = store.get_artifact(file_id)
     if artifact is not None:
         return explain_artifact(file_id, artifact)
+
+    if body and isinstance(body, dict):
+        return explain_artifact(file_id, body)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

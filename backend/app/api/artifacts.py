@@ -4,13 +4,12 @@ artifacts.py — Artifacts API router for case artifact listing and detail retri
 
 from __future__ import annotations
 
-from typing import List
-from fastapi import APIRouter, HTTPException, status, Response
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, HTTPException, status, Response, Body
 
 from backend.app.models.artifact import ArtifactResponse
 from backend.app.store import store
 from backend.app.scoring.explainer import explain_artifact
-from typing import Dict, Any
 
 router = APIRouter(tags=["artifacts"])
 
@@ -78,7 +77,7 @@ def get_artifact_detail(artifact_id: str) -> ArtifactResponse:
 
 
 @router.post("/artifacts/{artifact_id}/explain", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
-def explain_artifact_route(artifact_id: str) -> Dict[str, Any]:
+def explain_artifact_route(artifact_id: str, body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
     """Generate or retrieve a cached AI explanation for an artifact."""
     artifact = store.get_artifact(artifact_id)
     if artifact is not None:
@@ -96,6 +95,9 @@ def explain_artifact_route(artifact_id: str) -> Dict[str, Any]:
     run = store.get_recovery_run(artifact_id) or store.get_recovery_run_by_artifact(artifact_id)
     if run is not None:
         return explain_artifact(artifact_id, run)
+
+    if body and isinstance(body, dict):
+        return explain_artifact(artifact_id, body)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
