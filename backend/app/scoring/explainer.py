@@ -223,21 +223,55 @@ def explain_artifact(artifact_id: str, artifact: Any, force_refresh: bool = Fals
     else:
         # Grounded forensic deterministic generation
         if status == "PARTIALLY_RECOVERED":
-            repair_str = f", {r_bytes} bytes were structurally repaired," if r_bytes > 0 else ""
-            assessment = (
-                f"This artifact is partially recoverable. {v_bytes} bytes were mathematically "
-                f"verified from the uploaded evidence{repair_str} and a {m_bytes}-byte region remains unobserved."
-            )
-            why_it_matters = (
-                f"The recovered evidence is structurally valid ({method}), but the missing "
-                f"{m_bytes}-byte region prevents reconstruction of the complete artifact."
-            )
-            recovery_limitation = (
-                f"Recoverix did not infer, synthesize, or fabricate the missing {m_bytes} bytes."
-            )
-            recommended_next_step = (
-                "Review the original evidence source or adjacent storage regions for additional matching fragments."
-            )
+            if r_bytes > 0 and m_bytes == 0:
+                assessment = (
+                    f"The {fmt.upper()} artifact contains a structurally complete observed prefix. "
+                    f"The missing content was limited to {r_bytes} uniquely determined closing "
+                    f"{fmt.upper()} delimiters."
+                )
+                why_it_matters = (
+                    f"The reconstructed bytes were derived from the observed {fmt.upper()} "
+                    "container structure rather than predicted semantic content."
+                )
+                recovery_limitation = (
+                    f"Deterministic structural closure only ({method}). "
+                    "Recoverix strictly refused to predict or synthesize unobserved semantic data."
+                )
+                recommended_next_step = (
+                    f"Inspect the {fmt.upper()} structural tokens and verify that reconstructed closing syntax matches schema expectations."
+                )
+            elif r_bytes > 0:
+                assessment = (
+                    f"This artifact is partially recovered. {v_bytes} bytes were mathematically "
+                    f"verified from the uploaded evidence, {r_bytes} bytes were structurally reconstructed via {method}, "
+                    f"and an unobserved {m_bytes}-byte gap was preserved."
+                )
+                why_it_matters = (
+                    f"The reconstructed bytes were derived from deterministic grammar rules, "
+                    f"while the unobserved {m_bytes}-byte region was preserved to prevent evidence hallucination."
+                )
+                recovery_limitation = (
+                    "Missing bytes could not be deterministically established and were preserved as missing."
+                )
+                recommended_next_step = (
+                    "Review original evidence source or examine adjacent storage clusters for matching fragments."
+                )
+            else:
+                assessment = (
+                    f"This artifact is partially recovered. {v_bytes} bytes were mathematically "
+                    f"verified from the uploaded evidence, and an unobserved {m_bytes}-byte region remains missing."
+                )
+                why_it_matters = (
+                    f"Surviving evidence fragments maintain authoritative integrity ({method}), "
+                    f"but unobserved missing bytes cannot be deterministically inferred."
+                )
+                recovery_limitation = (
+                    "Missing bytes could not be deterministically established and were preserved as missing. "
+                    "Recoverix strictly refused to hallucinate synthetic content."
+                )
+                recommended_next_step = (
+                    "Review the original evidence source or adjacent storage regions for additional matching fragments."
+                )
         elif status == "FULLY_RECOVERED":
             assessment = (
                 f"This artifact is fully recovered. All {v_bytes} bytes were mathematically "

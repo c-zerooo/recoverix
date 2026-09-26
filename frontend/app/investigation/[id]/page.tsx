@@ -228,7 +228,7 @@ export default function InvestigationPage({
           </div>
 
           {/* Investigation Metadata Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
               <span className="text-[10px] text-slate-500 uppercase font-semibold block">INVESTIGATOR</span>
               <span className="text-slate-900 font-bold truncate block">{investigatorName}</span>
@@ -238,8 +238,12 @@ export default function InvestigationPage({
               <span className="text-slate-900 font-bold truncate block">{result.original_filename}</span>
             </div>
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase font-semibold block">RECOVERY METHOD</span>
+              <span className="text-sky-700 font-bold truncate block">{result.reconstruction_method}</span>
+            </div>
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
               <span className="text-[10px] text-slate-500 uppercase font-semibold block">RECOVERY RUN ID</span>
-              <span className="text-sky-700 font-bold truncate block">{result.run_id || "run_verified"}</span>
+              <span className="text-slate-700 font-bold truncate block">{result.run_id || "run_verified"}</span>
             </div>
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
               <span className="text-[10px] text-slate-500 uppercase font-semibold block">TOTAL INPUT BYTES</span>
@@ -283,7 +287,7 @@ export default function InvestigationPage({
                 <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold block mb-1">
                   FORENSIC ADMISSIBILITY CLASSIFICATION
                 </span>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
                   <span
                     className={`text-xl sm:text-2xl font-bold px-4 py-1.5 rounded-xl border ${
                       result.status === "FULLY_RECOVERED"
@@ -294,6 +298,9 @@ export default function InvestigationPage({
                     }`}
                   >
                     {result.status.replace("_", " ")}
+                  </span>
+                  <span className="text-xs bg-slate-100 text-slate-700 border border-slate-200 px-3 py-1.5 rounded-xl font-mono font-semibold">
+                    METHOD: {result.reconstruction_method}
                   </span>
                 </div>
               </div>
@@ -381,6 +388,9 @@ export default function InvestigationPage({
           <FragmentGraph
             filename={result.original_filename}
             totalBytes={totalBytes}
+            verifiedBytes={result.verified_bytes}
+            reconstructedBytes={result.reconstructed_bytes}
+            missingBytes={result.missing_bytes}
             fragments={fragments}
             damageRegions={damageRegions}
             reconstructionSteps={reconstructionSteps}
@@ -416,7 +426,7 @@ export default function InvestigationPage({
               <span>UNRECOVERED EVIDENCE — FORENSIC INTEGRITY NOTICE</span>
             </div>
             <p className="text-sm text-slate-800 leading-relaxed font-sans">
-              <strong>{result.missing_bytes.toLocaleString()} bytes</strong> could not be deterministically established from the supplied evidence buffer.
+              <strong>{result.missing_bytes.toLocaleString()} bytes</strong> could not be deterministically established and were preserved as missing.
             </p>
             <p className="text-xs text-slate-600 font-sans leading-relaxed">
               In digital forensics, unobserved bytes remain strictly classified as missing evidence to maintain strict chain of custody and legal admissibility. Recoverix guarantees that missing regions are never backfilled with hallucinated or synthetic filler.

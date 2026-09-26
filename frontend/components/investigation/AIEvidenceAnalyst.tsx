@@ -196,6 +196,57 @@ export function AIEvidenceAnalyst({
       ) : (
         /* ACTIVE STRUCTURED FORENSIC ANALYST */
         <div className="space-y-5">
+          {/* Deterministic Fact Bar */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                DETERMINISTIC FACTS:
+              </span>
+              <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 rounded font-mono font-semibold">
+                Verified: {evidenceFacts?.verified_bytes ?? brief?.facts?.verified_bytes ?? 0} B
+              </span>
+              <span
+                className={`border px-2.5 py-0.5 rounded font-mono font-semibold ${
+                  (evidenceFacts?.reconstructed_bytes ?? brief?.facts?.reconstructed_bytes ?? 0) > 0
+                    ? "bg-sky-50 text-sky-800 border-sky-300 font-bold"
+                    : "bg-slate-100 text-slate-600 border-slate-200"
+                }`}
+              >
+                Reconstructed: {evidenceFacts?.reconstructed_bytes ?? brief?.facts?.reconstructed_bytes ?? 0} B
+              </span>
+              <span
+                className={`border px-2.5 py-0.5 rounded font-mono font-semibold ${
+                  (evidenceFacts?.missing_bytes ?? brief?.facts?.missing_bytes ?? 0) > 0
+                    ? "bg-amber-50 text-amber-800 border-amber-300"
+                    : "bg-slate-100 text-slate-600 border-slate-200"
+                }`}
+              >
+                Missing: {evidenceFacts?.missing_bytes ?? brief?.facts?.missing_bytes ?? 0} B
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-600 font-mono">
+              Method: <strong className="text-slate-900">{evidenceFacts?.reconstruction_method ?? brief?.facts?.reconstruction_method ?? "NONE"}</strong>
+            </div>
+          </div>
+
+          {/* Safety Notice: Reconstructed vs Preserved Missing */}
+          {(evidenceFacts?.reconstructed_bytes ?? brief?.facts?.reconstructed_bytes ?? 0) > 0 ? (
+            <div className="bg-sky-50/70 border border-sky-200 rounded-xl p-3 text-xs text-sky-950 font-sans flex items-start gap-2">
+              <ShieldCheck className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <div>
+                <strong>Why this reconstruction is safe:</strong> The{" "}
+                {evidenceFacts?.reconstructed_bytes ?? brief?.facts?.reconstructed_bytes ?? 0} reconstructed bytes were derived strictly from observed container structure and format grammar rules rather than predicted semantic content.
+              </div>
+            </div>
+          ) : (evidenceFacts?.missing_bytes ?? brief?.facts?.missing_bytes ?? 0) > 0 ? (
+            <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 text-xs text-amber-950 font-sans flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <strong>Forensic preservation:</strong> Missing bytes could not be deterministically established and were preserved as missing rather than filled with synthetic speculation.
+              </div>
+            </div>
+          ) : null}
+
           {/* Top Row: Assessment & Priority */}
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
             {/* A. ASSESSMENT (Cols 1-3) */}

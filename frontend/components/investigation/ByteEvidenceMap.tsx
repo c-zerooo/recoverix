@@ -42,29 +42,53 @@ export function ByteEvidenceMap({
   if (fragments.length > 0) {
     // Add verified fragments
     fragments.forEach((f, idx) => {
-      segments.push({
-        id: f.fragment_id,
-        name: idx === 0 ? "Fragment A (Header)" : idx === 1 ? "Fragment B (Trailer)" : `Fragment ${idx + 1}`,
-        start: f.offset,
-        end: f.end_offset,
-        length: f.length,
-        type: "VERIFIED",
-        description: "Exact evidence bytes observed and validated intact without modification.",
-      });
+      const vLen = f.verified_bytes > 0 ? f.verified_bytes : f.length;
+      if (vLen > 0 && f.status !== "MISSING") {
+        segments.push({
+          id: f.fragment_id,
+          name: idx === 0 ? "Fragment A (Header)" : idx === 1 ? "Fragment B (Trailer)" : `Fragment ${idx + 1}`,
+          start: f.offset,
+          end: f.offset + vLen,
+          length: vLen,
+          type: "VERIFIED",
+          description: "Exact evidence bytes observed and validated intact without modification.",
+        });
+      }
     });
 
-    // Add damage regions (missing gaps)
+    // Add damage regions (distinguishing RECONSTRUCTED closures from MISSING gaps)
     damageRegions.forEach((d, idx) => {
+      const isRecon =
+        d.status === "RECONSTRUCTED" ||
+        d.type?.toUpperCase().includes("STRUCTURAL") ||
+        d.type?.toUpperCase().includes("CLOSURE");
+
       segments.push({
         id: d.region_id,
-        name: `Evidence Gap ${idx + 1}`,
+        name: isRecon ? `Reconstructed Closure (${d.length} B)` : `Evidence Gap ${idx + 1} (${d.length} B)`,
         start: d.start_offset,
         end: d.end_offset,
         length: d.length,
-        type: "MISSING",
-        description: "Unobserved evidence gap. Not deterministically recoverable; zero hallucinated filler.",
+        type: isRecon ? "RECONSTRUCTED" : "MISSING",
+        description: isRecon
+          ? "Deterministic structural syntax closure appended by parser. Derived strictly from grammar rules."
+          : "Unobserved evidence gap. Not deterministically recoverable; zero hallucinated filler.",
       });
     });
+
+    // If reconstructedBytes > 0 and no damage region was marked RECONSTRUCTED, append reconstructed segment
+    const hasReconSegment = segments.some((s) => s.type === "RECONSTRUCTED");
+    if (!hasReconSegment && reconstructedBytes > 0) {
+      segments.push({
+        id: "recon-closure-auto",
+        name: `Reconstructed Structural Closure (${reconstructedBytes} B)`,
+        start: verifiedBytes,
+        end: verifiedBytes + reconstructedBytes,
+        length: reconstructedBytes,
+        type: "RECONSTRUCTED",
+        description: "Deterministic syntax closure delimiters appended to restore format validity.",
+      });
+    }
 
     // Sort by start offset
     segments.sort((a, b) => a.start - b.start);
@@ -81,12 +105,23 @@ export function ByteEvidenceMap({
         description: "Original evidence buffer validated intact.",
       });
     }
+    if (reconstructedBytes > 0) {
+      segments.push({
+        id: "r-all",
+        name: "Deterministic Structural Reconstruction",
+        start: verifiedBytes,
+        end: verifiedBytes + reconstructedBytes,
+        length: reconstructedBytes,
+        type: "RECONSTRUCTED",
+        description: "Deterministic syntax reconstruction derived from format grammar.",
+      });
+    }
     if (missingBytes > 0) {
       segments.push({
         id: "m-all",
         name: "Unobserved Missing Evidence",
-        start: verifiedBytes,
-        end: verifiedBytes + missingBytes,
+        start: verifiedBytes + reconstructedBytes,
+        end: verifiedBytes + reconstructedBytes + missingBytes,
         length: missingBytes,
         type: "MISSING",
         description: "Unobserved evidence gap in source file.",

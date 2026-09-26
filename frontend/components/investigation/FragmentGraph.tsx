@@ -24,6 +24,9 @@ import {
 interface FragmentGraphProps {
   filename: string;
   totalBytes: number;
+  verifiedBytes?: number;
+  reconstructedBytes?: number;
+  missingBytes?: number;
   fragments: ForensicFragment[];
   damageRegions: DamageRegion[];
   reconstructionSteps: ReconstructionStep[];
@@ -48,6 +51,9 @@ interface InspectorNode {
 export function FragmentGraph({
   filename,
   totalBytes,
+  verifiedBytes,
+  reconstructedBytes,
+  missingBytes,
   fragments = [],
   damageRegions = [],
   reconstructionSteps = [],
@@ -56,6 +62,14 @@ export function FragmentGraph({
   reconstructionMethod,
   validationStatus,
 }: FragmentGraphProps) {
+  const vBytes = verifiedBytes ?? fragments.reduce((acc, f) => acc + (f.verified_bytes || 0), 0);
+  const rBytes =
+    reconstructedBytes ??
+    damageRegions.filter((d) => d.status === "RECONSTRUCTED").reduce((acc, d) => acc + d.length, 0);
+  const mBytes =
+    missingBytes ??
+    damageRegions.filter((d) => d.status !== "RECONSTRUCTED").reduce((acc, d) => acc + d.length, 0);
+
   // Classification of forensic scenario
   const isUnrecoverable =
     status === "UNRECOVERABLE" ||
@@ -72,18 +86,42 @@ export function FragmentGraph({
       reconstructionSteps.some((s) => s.method === "FRAGMENT_UNSHUFFLE") ||
       fragments.some((f) => f.source?.includes("shuffled")));
 
+  const isStructuralReconstruction =
+    !isUnrecoverable &&
+    !isShuffled &&
+    (rBytes > 0 ||
+      reconstructionMethod?.toUpperCase().includes("CLOSURE") ||
+      reconstructionMethod?.toUpperCase().includes("STRUCTURAL") ||
+      damageRegions.some((d) => d.status === "RECONSTRUCTED" || d.type?.toUpperCase().includes("CLOSURE")));
+
   const isFragmentedWithGap =
     !isShuffled &&
     !isUnrecoverable &&
+    !isStructuralReconstruction &&
     (damageRegions.length > 0 || fragments.length > 1);
 
   const isContiguous =
     !isUnrecoverable &&
     !isShuffled &&
+    !isStructuralReconstruction &&
     !isFragmentedWithGap;
 
   // Determine initial inspector node based on real evidence
   const getInitialNode = (): InspectorNode => {
+    if (isStructuralReconstruction) {
+      return {
+        id: "recon-closure",
+        type: "RECONSTRUCTION",
+        label: `RECONSTRUCTED CLOSURE (${rBytes} B)`,
+        offsetRange: `${vBytes} B – ${vBytes + rBytes} B`,
+        length: `${rBytes} Bytes`,
+        status: "RECONSTRUCTED (GRAMMAR DERIVED)",
+        source: reconstructionMethod || "JSON_STRUCTURAL_CLOSURE",
+        description:
+          "Uniquely determined structural closing delimiters appended by deterministic format grammar parser. Zero hallucinated keys or values.",
+      };
+    }
+
     if (isShuffled) {
       return {
         id: "shuffled-rel",
@@ -107,7 +145,7 @@ export function FragmentGraph({
         offsetRange: `0 B – ${totalBytes} B`,
         length: `${totalBytes} Bytes`,
         status: "UNRECOVERABLE",
-        source: "Format Syntax & Structure Parser",
+        source: reconstructionMethod || "Format Syntax & Structure Parser",
         description:
           "No valid reconstruction relationship established. Evidence tokens contain unrecoverable syntax deformation. Refusing to synthesize hallucinated data.",
       };
@@ -160,13 +198,26 @@ export function FragmentGraph({
   // Sync selected node when inputs change
   useEffect(() => {
     setSelectedNode(getInitialNode());
-  }, [filename, totalBytes, fragments, damageRegions, reconstructionSteps, status, reconstructionMethod]);
+  }, [
+    filename,
+    totalBytes,
+    verifiedBytes,
+    reconstructedBytes,
+    missingBytes,
+    fragments,
+    damageRegions,
+    reconstructionSteps,
+    status,
+    reconstructionMethod,
+  ]);
 
   // Compute actual node count for display
   const nodeCount = isContiguous
     ? 2
     : isShuffled
     ? 5
+    : isStructuralReconstruction
+    ? 4
     : isUnrecoverable
     ? 3
     : 1 + fragments.length + damageRegions.length + 1; // root + frags + gaps + assembly
@@ -192,7 +243,15 @@ export function FragmentGraph({
           <div className="flex items-center gap-2">
             <span
               className={`w-2 h-2 rounded-full ${
-                isUnrecoverable ? "bg-rose-500" : isShuffled ? "bg-sky-500" : isFragmentedWithGap ? "bg-amber-500" : "bg-emerald-500"
+                isUnrecoverable
+                  ? "bg-rose-500"
+                  : isStructuralReconstruction
+                  ? "bg-sky-500"
+                  : isShuffled
+                  ? "bg-sky-500"
+                  : isFragmentedWithGap
+                  ? "bg-amber-500"
+                  : "bg-emerald-500"
               }`}
             />
             <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900">
@@ -202,6 +261,8 @@ export function FragmentGraph({
           <p className="text-xs text-slate-600 font-sans mt-0.5">
             {isContiguous
               ? "Single contiguous verified evidence stream with zero missing gaps."
+              : isStructuralReconstruction
+              ? "Deterministic structural reconstruction: validated prefix completed with grammar-derived closing syntax."
               : isShuffled
               ? "Deterministic sequence unshuffle: out-of-order raw fragments reordered to valid specification."
               : isUnrecoverable
@@ -218,10 +279,16 @@ export function FragmentGraph({
             className={`border px-2.5 py-1 rounded font-semibold ${
               isUnrecoverable
                 ? "bg-rose-50 text-rose-800 border-rose-200"
+                : isStructuralReconstruction
+                ? "bg-sky-50 text-sky-800 border-sky-200"
                 : "bg-emerald-50 text-emerald-800 border-emerald-200"
             }`}
           >
-            {isUnrecoverable ? "CORRUPT EVIDENCE" : "ZERO HALLUCINATION"}
+            {isUnrecoverable
+              ? "CORRUPT EVIDENCE"
+              : isStructuralReconstruction
+              ? "STRUCTURAL RECONSTRUCTION (R > 0)"
+              : "ZERO HALLUCINATION"}
           </span>
         </div>
       </div>
@@ -255,7 +322,7 @@ export function FragmentGraph({
                 selectedNode.id === "root" ? "text-slate-300" : "text-slate-500"
               }`}
             >
-              ORIGINAL EVIDENCE CONTAINER
+              OBSERVED EVIDENCE CONTAINER
             </div>
             <div className="text-sm font-bold flex items-center justify-center gap-1.5 mt-0.5">
               <FileText
@@ -315,6 +382,129 @@ export function FragmentGraph({
                 </div>
                 <div className="text-[10px] text-emerald-700 font-semibold mt-1">
                   1:1 Byte Mapping to Source
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* CASE C: DETERMINISTIC STRUCTURAL RECONSTRUCTION (e.g. JSON CLOSURE) */}
+          {/* ========================================================================= */}
+          {isStructuralReconstruction && (
+            <div className="w-full flex flex-col items-center space-y-3 mt-1">
+              {/* 1. Verified Evidence Prefix Node */}
+              <div
+                onClick={() =>
+                  setSelectedNode({
+                    id: "verified-prefix",
+                    type: "FRAGMENT",
+                    label: `VERIFIED ${format?.toUpperCase() || "FORMAT"} PREFIX [0 B – ${vBytes} B]`,
+                    offsetRange: `0 B – ${vBytes} B`,
+                    length: `${vBytes} Bytes`,
+                    status: "VERIFIED INTACT",
+                    source: fragments[0]?.source || "direct_reconstruction",
+                    description:
+                      "Syntactically complete object key-value tokens observed directly in raw evidence buffer without modification.",
+                  })
+                }
+                className={`cursor-pointer max-w-md w-full p-4 rounded-xl border text-center transition-all ${
+                  selectedNode.id === "verified-prefix"
+                    ? "bg-emerald-50 border-2 border-emerald-600 text-emerald-950 scale-105 shadow-md shadow-emerald-500/10"
+                    : "bg-white border border-emerald-300 hover:border-emerald-500 text-slate-800 shadow-2xs"
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5 text-emerald-700 text-xs font-bold uppercase mb-1">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>VERIFIED {format?.toUpperCase() || "EVIDENCE"} PREFIX</span>
+                </div>
+                <div className="text-xs font-bold text-slate-900">
+                  0 B – {vBytes} B ({vBytes} Bytes)
+                </div>
+                <div className="text-[10px] text-emerald-700 font-semibold mt-1">
+                  Status: VERIFIED INTACT · 100% Observed Evidence
+                </div>
+              </div>
+
+              {/* Connector Down */}
+              <div className="w-full flex justify-center py-1">
+                <div className="w-0.5 h-5 bg-slate-300 flex items-center justify-center">
+                  <ArrowDown className="w-3 h-3 text-slate-400 translate-y-2.5" />
+                </div>
+              </div>
+
+              {/* 2. Reconstructed Closure Region Node */}
+              <div
+                onClick={() =>
+                  setSelectedNode({
+                    id: "recon-closure",
+                    type: "RECONSTRUCTION",
+                    label: `RECONSTRUCTED REGION (${rBytes} B)`,
+                    offsetRange: `${vBytes} B – ${vBytes + rBytes} B`,
+                    length: `${rBytes} Bytes`,
+                    status: "RECONSTRUCTED (GRAMMAR DERIVED)",
+                    source: reconstructionMethod || "JSON_STRUCTURAL_CLOSURE",
+                    description:
+                      "Uniquely determined structural closing delimiters appended by deterministic format grammar parser. Zero hallucinated keys or values.",
+                  })
+                }
+                className={`cursor-pointer max-w-md w-full p-4 rounded-xl border text-center transition-all ${
+                  selectedNode.id === "recon-closure"
+                    ? "bg-sky-50 border-2 border-sky-600 text-sky-950 scale-105 shadow-md shadow-sky-500/10"
+                    : "bg-white border border-sky-300 hover:border-sky-500 text-slate-800 shadow-2xs"
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5 text-sky-700 text-xs font-bold uppercase mb-1">
+                  <Cpu className="w-4 h-4" />
+                  <span>RECONSTRUCTED REGION: {rBytes} B</span>
+                </div>
+                <div className="text-xs font-bold text-slate-900">
+                  Offset {vBytes} B – {vBytes + rBytes} B
+                </div>
+                <div className="text-[11px] text-sky-900 font-medium mt-0.5">
+                  METHOD: {reconstructionMethod || "JSON_STRUCTURAL_CLOSURE"}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1">
+                  Forced Delimiters Only · Zero Hallucination
+                </div>
+              </div>
+
+              {/* Connector Down */}
+              <div className="w-full flex justify-center py-1">
+                <div className="w-0.5 h-5 bg-slate-300 flex items-center justify-center">
+                  <ArrowDown className="w-3 h-3 text-slate-400 translate-y-2.5" />
+                </div>
+              </div>
+
+              {/* 3. Valid Artifact Output Node */}
+              <div
+                onClick={() =>
+                  setSelectedNode({
+                    id: "valid-artifact",
+                    type: "TARGET",
+                    label: `VALID ${format?.toUpperCase() || "FORMAT"} ARTIFACT`,
+                    offsetRange: `0 B – ${vBytes + rBytes} B`,
+                    length: `${vBytes + rBytes} Bytes`,
+                    status: "PARTIALLY RECOVERED (VALID SPEC)",
+                    source: "json_parser",
+                    description:
+                      `Valid ${format?.toUpperCase() || "JSON"} document validated by parser. Structural closure enables full programmatic parsing without semantic hallucination.`,
+                  })
+                }
+                className={`cursor-pointer max-w-md w-full p-4 rounded-xl border text-center transition-all ${
+                  selectedNode.id === "valid-artifact"
+                    ? "bg-emerald-50 border-2 border-emerald-600 text-emerald-950 scale-105 shadow-md shadow-emerald-500/10"
+                    : "bg-white border border-emerald-300 hover:border-emerald-500 text-slate-800 shadow-2xs"
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5 text-emerald-700 text-xs font-bold uppercase mb-1">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>VALID {format?.toUpperCase() || "JSON"} ARTIFACT ({vBytes + rBytes} B)</span>
+                </div>
+                <div className="text-[11px] text-slate-700">
+                  Status: PARTIALLY RECOVERED · VALID SPEC · {mBytes} B Missing
+                </div>
+                <div className="text-[10px] text-emerald-700 font-semibold mt-1">
+                  Authoritative Parser Verification Passed
                 </div>
               </div>
             </div>
@@ -739,6 +929,8 @@ export function FragmentGraph({
                       ? "text-amber-700"
                       : selectedNode.status.includes("UNRECOVERABLE")
                       ? "text-rose-700"
+                      : selectedNode.status.includes("RECONSTRUCTED")
+                      ? "text-sky-700"
                       : "text-emerald-700"
                   }`}
                 >
@@ -757,7 +949,7 @@ export function FragmentGraph({
                     ? "bg-amber-100 text-amber-800 border-amber-300"
                     : selectedNode.status.includes("UNRECOVERABLE") || selectedNode.status.includes("FAILED")
                     ? "bg-rose-100 text-rose-800 border-rose-300"
-                    : selectedNode.status.includes("REORDERED")
+                    : selectedNode.status.includes("RECONSTRUCTED") || selectedNode.status.includes("REORDERED")
                     ? "bg-sky-100 text-sky-800 border-sky-300"
                     : "bg-slate-200 text-slate-800 border-slate-300"
                 }`}
