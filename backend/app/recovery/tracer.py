@@ -997,7 +997,7 @@ def execute_traced_recovery(
     # Scenario 4: No candidate signatures found (direct format validation or unrecoverable)
     else:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
-        target_fmt = ext if ext in VALIDATORS else "txt"
+        target_fmt = ext if ext in VALIDATORS else "bin"
 
         emit_event("VALIDATION_STARTED", f"Testing direct format validation for '{target_fmt}'")
         val_res = validate_artifact(target_fmt, content)
