@@ -153,6 +153,11 @@ class InMemoryStore:
             if artifact.artifact_id not in self._case_artifacts[artifact.case_id]:
                 self._case_artifacts[artifact.case_id].append(artifact.artifact_id)
 
+            # Establish artifact_id -> run_id linkage if run_id is present in metadata
+            run_id = artifact.metadata.get("run_id") if artifact.metadata else None
+            if run_id:
+                self._artifact_runs[artifact.artifact_id] = run_id
+
             self._cases[artifact.case_id]["artifact_count"] = len(self._case_artifacts[artifact.case_id])
             return artifact
 
@@ -218,6 +223,10 @@ class InMemoryStore:
         """Retrieve RecoveryRun associated with an artifact_id."""
         with self._lock:
             run_id = self._artifact_runs.get(artifact_id)
+            if not run_id and artifact_id in self._artifacts:
+                art = self._artifacts[artifact_id]
+                if art.metadata:
+                    run_id = art.metadata.get("run_id")
             if run_id:
                 return self._recovery_runs.get(run_id)
             return None

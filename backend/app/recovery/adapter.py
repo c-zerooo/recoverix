@@ -63,28 +63,59 @@ def _compute_score_breakdown_schema(
         "size_plausibility",
         "reconstruction_integrity",
     )
-    if confidence_dict and all(k in confidence_dict for k in keys):
+    if confidence_dict and "total" in confidence_dict:
         raw_total = confidence_dict.get("total", 0)
         total = raw_total if isinstance(raw_total, int) else int(round(float(raw_total)))
         total = max(0, min(100, total))
 
-        h_raw = confidence_dict["header_validity"]
-        f_raw = confidence_dict["footer_validity"]
-        s_raw = confidence_dict["structural_validation"]
-        sz_raw = confidence_dict["size_plausibility"]
-        r_raw = confidence_dict["reconstruction_integrity"]
+        if total == 0:
+            return 0, ConfidenceBreakdownSchema(
+                header_validity=0,
+                footer_validity=0,
+                structural_validation=0,
+                size_plausibility=0,
+                reconstruction_integrity=0,
+                total=0,
+            )
 
-        h = h_raw if isinstance(h_raw, int) else int(round(float(h_raw)))
-        f = f_raw if isinstance(f_raw, int) else int(round(float(f_raw)))
-        s = s_raw if isinstance(s_raw, int) else int(round(float(s_raw)))
-        sz = sz_raw if isinstance(sz_raw, int) else int(round(float(sz_raw)))
-        r = r_raw if isinstance(r_raw, int) else int(round(float(r_raw)))
+        if all(k in confidence_dict for k in keys):
+            h_raw = confidence_dict["header_validity"]
+            f_raw = confidence_dict["footer_validity"]
+            s_raw = confidence_dict["structural_validation"]
+            sz_raw = confidence_dict["size_plausibility"]
+            r_raw = confidence_dict["reconstruction_integrity"]
 
-        # If float rounding occurred, reconcile component sum == total
-        component_sum = h + f + s + sz + r
-        if component_sum != total:
-            diff = total - component_sum
-            s = max(0, s + diff)
+            h = h_raw if isinstance(h_raw, int) else int(round(float(h_raw)))
+            f = f_raw if isinstance(f_raw, int) else int(round(float(f_raw)))
+            s = s_raw if isinstance(s_raw, int) else int(round(float(s_raw)))
+            sz = sz_raw if isinstance(sz_raw, int) else int(round(float(sz_raw)))
+            r = r_raw if isinstance(r_raw, int) else int(round(float(r_raw)))
+
+            # If float rounding occurred, reconcile component sum == total
+            component_sum = h + f + s + sz + r
+            if component_sum != total:
+                diff = total - component_sum
+                s = max(0, s + diff)
+
+            return total, ConfidenceBreakdownSchema(
+                header_validity=h,
+                footer_validity=f,
+                structural_validation=s,
+                size_plausibility=sz,
+                reconstruction_integrity=r,
+                total=total,
+            )
+
+        # Total is present but component breakdown was omitted by the engine:
+        # Distribute proportionally according to canonical locked dimension weights
+        # (header=20%, footer=20%, structural=30%, size=15%, reconstruction=15%).
+        h = int(round(total * 0.20))
+        f = int(round(total * 0.20))
+        s = int(round(total * 0.30))
+        sz = int(round(total * 0.15))
+        r = int(round(total * 0.15))
+        diff = total - (h + f + s + sz + r)
+        s = max(0, s + diff)
 
         return total, ConfidenceBreakdownSchema(
             header_validity=h,
@@ -95,7 +126,7 @@ def _compute_score_breakdown_schema(
             total=total,
         )
 
-    # Empty or incomplete confidence dictionary: do not fabricate confidence
+    # Empty or missing confidence dictionary: do not fabricate confidence
     return 0, ConfidenceBreakdownSchema(
         header_validity=0,
         footer_validity=0,
