@@ -1,10 +1,6 @@
 """
-store.py — Thread-safe in-memory repository and storage facade for Recoverix.
-
-Re-exports repository contracts and provides the singleton `store` instance.
+backend/app/storage/__init__.py — Storage and repository exports for Recoverix platform.
 """
-
-from __future__ import annotations
 
 from backend.app.storage.contracts import (
     BlobStore,
@@ -15,16 +11,12 @@ from backend.app.storage.contracts import (
 from backend.app.storage.blob_store import InMemoryBlobStore
 from backend.app.storage.memory_store import InMemoryStore, MAX_EVIDENCE_SIZE
 
-# Global store instance (facade for in-memory repositories)
-store = InMemoryStore()
-
 __all__ = [
-    "MAX_EVIDENCE_SIZE",
     "BlobStore",
     "CaseRepository",
     "ArtifactRepository",
     "RecoveryRunRepository",
     "InMemoryBlobStore",
     "InMemoryStore",
-    "store",
+    "MAX_EVIDENCE_SIZE",
 ]

@@ -110,14 +110,14 @@ def test_recover_single_file_empty_400():
     assert response.json()["detail"] == "EMPTY_FILE"
 
 
-def test_recover_single_file_too_large_400():
-    """Test uploading a file larger than 5 MB returns 400 Bad Request."""
+def test_recover_single_file_too_large_413():
+    """Test uploading a file larger than 5 MB returns 413 Payload Too Large."""
     oversized = b"A" * (5 * 1024 * 1024 + 1)
     response = client.post(
         "/api/recover-file",
         files={"file": ("large.txt", oversized, "text/plain")},
     )
-    assert response.status_code == 400
+    assert response.status_code == 413
     assert response.json()["detail"] == "FILE_TOO_LARGE"
 
 

@@ -14,11 +14,6 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, status, Response
 from pydantic import BaseModel
 
 from backend.app.store import store, MAX_EVIDENCE_SIZE
-from backend.app.recovery.scanner import scan_evidence, Candidate
-from backend.app.recovery.carver import carve_candidate, RecoveredArtifact
-from backend.app.recovery.validators import validate_artifact, VALIDATORS
-from backend.app.recovery.bifragment import reconstruct_bifragment
-from backend.app.scoring.confidence import evaluate_artifact_confidence
 from backend.app.recovery.tracer import execute_traced_recovery
 from backend.app.scoring.explainer import explain_artifact
 
@@ -66,7 +61,7 @@ async def recover_single_file(file: UploadFile = File(...)) -> FileRecoveryRespo
 
     if len(content) > MAX_EVIDENCE_SIZE:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="FILE_TOO_LARGE",
         )
 
@@ -80,8 +75,6 @@ async def recover_single_file(file: UploadFile = File(...)) -> FileRecoveryRespo
         artifact_id=file_id,
     )
 
-    # Extract results from trace
-    metadict = store.get_recovered_file_metadata(file_id)
     # Re-map from recovery_run
     fmt = recovery_run.format
     status_val = recovery_run.status

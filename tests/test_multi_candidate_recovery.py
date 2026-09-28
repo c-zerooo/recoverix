@@ -28,6 +28,7 @@ from backend.app.recovery.tracer import (
     execute_traced_multi_recovery,
 )
 from backend.app.models.recovery_run import RecoveryRun
+from backend.app.store import store
 
 
 # ── Scenario A: Single Candidate ─────────────────────────────────────────────
@@ -308,7 +309,8 @@ def test_scenario_j_existing_execute_traced_recovery_unchanged():
         detection_mode="known_file",
     )
     assert isinstance(run, RecoveryRun)
-    assert run.artifact_id == "art-explicit-id"
+    assert store.get_recovery_run_by_artifact("art-explicit-id") is not None
+    assert store.get_recovery_run_by_artifact("art-explicit-id").run_id == run.run_id
     assert run.status == "FULLY_RECOVERED"
     assert run.total_verified_bytes == len(content)
     assert run.total_missing_bytes == 0

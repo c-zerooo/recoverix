@@ -1942,8 +1942,7 @@ def execute_traced_recovery(
                 primary_run = runs[0]
 
         if artifact_id is not None:
-            primary_run = primary_run.model_copy(update={"artifact_id": artifact_id})
-            store.add_recovery_run(primary_run)
+            store.link_artifact_to_run(artifact_id, primary_run.run_id)
         return primary_run
 
     # Defensive fallback when no runs produced
@@ -1951,7 +1950,9 @@ def execute_traced_recovery(
         filename=filename,
         content=content,
         case_id=case_id,
-        artifact_id=artifact_id,
+        artifact_id=None,
         detection_mode=detection_mode or "blind",
     )
+    if artifact_id is not None:
+        store.link_artifact_to_run(artifact_id, fallback_run.run_id)
     return fallback_run
