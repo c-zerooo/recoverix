@@ -88,3 +88,4 @@ class RecoveryRun(BaseModel):
     confidence: Optional[Dict[str, Any]] = None
     provenance: Optional[Dict[str, Any]] = None
     output: Optional[Dict[str, Any]] = None
+    detection_mode: Optional[str] = "known_file"

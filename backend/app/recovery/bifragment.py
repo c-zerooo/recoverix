@@ -33,12 +33,15 @@ def reconstruct_bifragment(
     min_gap: int = 1,
     max_gap: int = 4096,
     gap_placeholder: bytes = b" ",
+    preserve_ambiguity: bool = False,
 ) -> BifragmentReconstructionResult:
     """Attempt bounded bifragment reconstruction for two fragments across a gap.
 
     Search bounds are strictly limited to [min_gap, max_gap] (where 1 <= min_gap <= max_gap <= 4096).
-    Candidate gap sizes are tested using *validator*. If one or more gap sizes produce
-    a valid ValidationResult, the smallest valid gap size is selected.
+    Candidate gap sizes are tested using *validator*.
+    - If exactly 1 candidate satisfies constraints, it is selected.
+    - If multiple candidates are valid and preserve_ambiguity=True, ambiguity is preserved
+      (gap_size=None, selected_gap_size=null) rather than guessing or picking smallest.
 
     Args:
         fragment_a: First fragment (raw bytes or RecoveredArtifact).
@@ -49,6 +52,7 @@ def reconstruct_bifragment(
         gap_placeholder: Byte sequence used during validator evaluation (default b" ").
             These bytes are used strictly for format/marker parsing and are NEVER
             presented as recovered evidence.
+        preserve_ambiguity: If True and multiple gap sizes validate, keep gap_size=None.
 
     Returns:
         A BifragmentReconstructionResult recording the outcome, selected gap size,
@@ -132,31 +136,41 @@ def reconstruct_bifragment(
     valid_count = len(valid_candidates)
 
     if valid_count > 0:
-        # Select SMALLEST valid gap size
         valid_candidates.sort(key=lambda item: item[0])
         smallest_gap, best_validation = valid_candidates[0]
+
+        is_ambiguous = (valid_count > 1 and preserve_ambiguity)
+        selected_gap = None if is_ambiguous else smallest_gap
+        reported_missing = 0 if is_ambiguous else smallest_gap
+        meta_status = "AMBIGUOUS_GAP" if is_ambiguous else "BOUNDED_GAP_VERIFIED"
+        unknown_notice = (
+            f"Structural validation accepted {valid_count} candidate gap sizes. "
+            "Because the evidence cannot distinguish among them, ambiguity is preserved "
+            "and no gap size is arbitrarily selected (selected_gap_size = null)."
+            if is_ambiguous
+            else f"Structural validation succeeded with gap size {smallest_gap}. "
+                 "The missing bytes themselves are unobserved and NOT synthesized."
+        )
 
         return BifragmentReconstructionResult(
             success=True,
             format=fmt,
             fragment_a_id=id_a,
             fragment_b_id=id_b,
-            gap_size=smallest_gap,
-            missing_byte_count=smallest_gap,
+            gap_size=selected_gap,
+            missing_byte_count=reported_missing,
             reconstruction_method="BIFRAGMENT_GAP",
             validation_result=best_validation,
             valid_candidate_count=valid_count,
             fragment_a_bytes=raw_a,
             fragment_b_bytes=raw_b,
             missing_region_metadata={
-                "status": "BOUNDED_GAP_VERIFIED",
-                "missing_byte_count": smallest_gap,
+                "status": meta_status,
+                "missing_byte_count": reported_missing,
+                "selected_gap_size": selected_gap,
                 "gap_range_searched": [min_gap, max_gap],
                 "valid_candidate_count": valid_count,
-                "unknown_bytes_notice": (
-                    f"Structural validation succeeded with gap size {smallest_gap}. "
-                    "The missing bytes themselves are unobserved and NOT synthesized."
-                ),
+                "unknown_bytes_notice": unknown_notice,
             },
         )
     else:

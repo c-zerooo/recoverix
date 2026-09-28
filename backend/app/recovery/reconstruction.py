@@ -78,6 +78,7 @@ from backend.app.recovery.reconstructors.json import reconstruct_json
 def reconstruct_text(
     data: bytes,
     original_data: Optional[bytes] = None,
+    detection_mode: str = "known_file",
 ) -> ReconstructionResult:
     """Deterministically reconstruct damaged TXT evidence into a valid TXT file."""
     data = bytes(data)
@@ -110,7 +111,7 @@ def reconstruct_text(
             details={"reason": "Evidence is predominantly binary, not recoverable text"},
         )
 
-    return reconstruct_txt(data, ground_truth=original_data)
+    return reconstruct_txt(data, ground_truth=original_data, detection_mode=detection_mode)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,6 +144,7 @@ def _sniff_csv_delimiter(text: str) -> str:
 def reconstruct_csv(
     data: bytes,
     original_data: Optional[bytes] = None,
+    detection_mode: str = "known_file",
 ) -> ReconstructionResult:
     """Deterministically reconstruct damaged CSV evidence into a valid CSV file.
 
@@ -548,11 +550,27 @@ def reconstruct_csv(
     if original_data is not None:
         is_exact = (hashlib.sha256(out_buf).digest() == hashlib.sha256(original_data).digest())
 
-    # FULLY_RECOVERED requires that nothing was reconstructed and nothing is
-    # missing. A byte-exact output can still contain structurally reconstructed
+    if uses_synthetic_markers:
+        effective_detection_mode = "synthetic_harness"
+    else:
+        effective_detection_mode = detection_mode
+
+    from backend.app.recovery.completeness import assess_artifact_completeness
+    is_complete = assess_artifact_completeness(
+        fmt="csv",
+        content=out_buf,
+        detection_mode=effective_detection_mode,
+        validation_result=val_res,
+        missing_bytes=missing_bytes_count,
+        reconstructed_bytes=reconstructed_bytes_count,
+    )
+
+    # FULLY_RECOVERED requires that nothing was reconstructed, nothing is
+    # missing, and the evidence is sufficient to establish a complete artifact.
+    # A byte-exact output can still contain structurally reconstructed
     # bytes (a restored quote or trailing newline), and those bytes are not
     # verified, so the status must not claim full recovery.
-    if val_res.valid and missing_bytes_count == 0 and reconstructed_bytes_count == 0:
+    if val_res.valid and missing_bytes_count == 0 and reconstructed_bytes_count == 0 and is_complete:
         status_str = "FULLY_RECOVERED"
     elif val_res.valid:
         status_str = "PARTIALLY_RECOVERED"
@@ -589,6 +607,7 @@ def reconstruct_artifact(
     fmt: str,
     data: bytes,
     original_data: Optional[bytes] = None,
+    detection_mode: str = "known_file",
 ) -> ReconstructionResult:
     """Route deterministic reconstruction to the appropriate format reconstructor.
 
@@ -596,6 +615,7 @@ def reconstruct_artifact(
         fmt: Format identifier ('txt', 'csv', etc.).
         data: Raw damaged evidence bytes.
         original_data: Optional ground-truth bytes.
+        detection_mode: 'known_file', 'blind', or 'synthetic_harness'.
 
     Returns:
         ReconstructionResult with usable recovered bytes and byte accounting.
@@ -605,9 +625,9 @@ def reconstruct_artifact(
         data = data.recovered_bytes
     if clean_fmt == "txt":
         # reconstruct_text rejects predominantly binary evidence as unrecoverable.
-        return reconstruct_text(data, original_data=original_data)
+        return reconstruct_text(data, original_data=original_data, detection_mode=detection_mode)
     elif clean_fmt == "csv":
-        return reconstruct_csv(data, original_data=original_data)
+        return reconstruct_csv(data, original_data=original_data, detection_mode=detection_mode)
     elif clean_fmt == "json":
         return reconstruct_json(data, original_data=original_data)
     else:
@@ -797,17 +817,28 @@ def reconstruct_fragment_pair(
     valid_count = search.valid_candidate_count
     candidates_tried = max_gap - min_gap + 1
 
-    # A search that accepts *every* candidate gap carries no information about the
-    # true gap size. In that case the gap is reported as undetermined and the
-    # missing-byte count falls back to the provable lower bound observed between
-    # the two fragments, never to an arbitrary structural minimum.
-    search_discriminating = valid_count < candidates_tried
-    if search_discriminating:
+    # Ambiguity Policy (Requirement 4):
+    # - If exactly 1 candidate gap satisfies constraints -> select it.
+    # - If multiple candidates are valid and evidence cannot distinguish them ->
+    #   preserve ambiguity (selected_gap_size = None, gap_size_determined = False).
+    #   Do NOT arbitrarily pick smallest or valid_candidates[0].
+    # - If additional deterministic evidence (e.g. unique observed gap match) distinguishes them ->
+    #   select uniquely supported candidate.
+    is_uniquely_determined = False
+    if valid_count == 1:
+        is_uniquely_determined = True
         gap_missing = selected_gap
-    elif observed_gap is not None:
+    elif observed_gap is not None and observed_gap == selected_gap and valid_count > 1:
+        # If the observed gap in evidence uniquely matches a valid candidate
+        is_uniquely_determined = True
         gap_missing = observed_gap
     else:
-        gap_missing = selected_gap
+        # Multiple candidates valid and evidence cannot distinguish them: preserve ambiguity
+        is_uniquely_determined = False
+        gap_missing = observed_gap if observed_gap is not None else (selected_gap or 0)
+
+    search_discriminating = is_uniquely_determined
+    effective_selected_gap = selected_gap if is_uniquely_determined else None
 
     missing = gap_missing + intra_missing
     recovered = res_a.recovered_bytes + res_b.recovered_bytes
@@ -818,8 +849,8 @@ def reconstruct_fragment_pair(
         "gap_candidates_tried": candidates_tried,
         "valid_candidate_count": valid_count,
         "search_discriminating": search_discriminating,
-        "selected_gap_size": selected_gap if search_discriminating else None,
-        "gap_size_determined": search_discriminating,
+        "selected_gap_size": effective_selected_gap,
+        "gap_size_determined": is_uniquely_determined,
         "observed_gap": observed_gap,
         "proven_minimum_missing": gap_missing,
         "intra_fragment_missing_bytes": intra_missing,
@@ -833,18 +864,18 @@ def reconstruct_fragment_pair(
         "output_sha256": hashlib.sha256(recovered).hexdigest(),
     }
 
-    if search_discriminating:
+    if is_uniquely_determined:
         details["notice"] = (
-            f"Structural validation accepted {valid_count} of {candidates_tried} "
-            f"candidate gap sizes; selected smallest = {selected_gap}. The gap bytes "
-            "themselves are unobserved and were NOT synthesized, padded, or emitted."
+            f"Structural validation uniquely determined candidate gap size = {effective_selected_gap}. "
+            "The gap bytes themselves are unobserved and were NOT synthesized, padded, or emitted."
         )
     else:
         details["notice"] = (
-            f"Structural validation accepted all {valid_count} candidate gap sizes, so "
-            "the true gap size is NOT determined by this evidence. Missing bytes are "
-            "reported as the provable lower bound observed between the fragments. No "
-            "gap bytes were synthesized, padded, or emitted."
+            f"Structural validation accepted {valid_count} candidate gap sizes. "
+            "Because the evidence cannot distinguish among them, ambiguity is preserved "
+            "and no gap size is arbitrarily selected (selected_gap_size = null). "
+            "Missing bytes are reported as the provable lower bound observed between fragments. "
+            "No gap bytes were synthesized, padded, or emitted."
         )
 
     result = ReconstructionResult(

@@ -40,6 +40,7 @@ from backend.app.recovery.signatures import (
     PDF_HEADER_SIGNATURE,
     PDF_TRAILER_SIGNATURE,
 )
+from backend.app.recovery.completeness import assess_artifact_completeness
 
 
 def execute_traced_recovery(
@@ -47,6 +48,7 @@ def execute_traced_recovery(
     content: bytes,
     case_id: Optional[str] = None,
     artifact_id: Optional[str] = None,
+    detection_mode: Optional[str] = None,
 ) -> RecoveryRun:
     """Execute a traced forensic recovery run over *content*.
 
@@ -55,10 +57,23 @@ def execute_traced_recovery(
         content: Raw evidence bytes.
         case_id: Optional associated case identifier.
         artifact_id: Optional associated artifact identifier.
+        detection_mode: Optional detection mode ('known_file', 'blind', 'synthetic_harness').
 
     Returns:
         Stored RecoveryRun instance containing the real forensic trace.
     """
+    if detection_mode is None:
+        if SYNTHETIC_START_MARKER in content:
+            detection_mode = "synthetic_harness"
+        else:
+            ext_check = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if ext_check in ("txt", "csv", "json", "xml", "png", "jpg", "jpeg", "pdf") and not any(
+                filename.lower().startswith(prefix) for prefix in ("carved_", "blind_", "dump", "unallocated", "raw_")
+            ):
+                detection_mode = "known_file"
+            else:
+                detection_mode = "blind"
+
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     started_at = datetime.now(timezone.utc)
 
@@ -134,6 +149,18 @@ def execute_traced_recovery(
     if candidates:
         candidates.sort(key=_rank_candidate, reverse=True)
 
+    forced_text_fmt: Optional[str] = None
+    if not any(c.detection_method == "synthetic_boundary" for c in candidates):
+        if not (b"%PDF-" in content or PNG_SIGNATURE in content or content.startswith(b"\xff\xd8") or content.startswith(b"<?xml")):
+            probe_csv = detect_text_fragments(content, "csv")
+            probe_txt = detect_text_fragments(content, "txt")
+            if len(probe_csv) >= 2 and (ext_fmt == "csv" or not ext_fmt):
+                candidates = []
+                forced_text_fmt = "csv"
+            elif len(probe_txt) >= 2 and (ext_fmt == "txt" or not ext_fmt):
+                candidates = []
+                forced_text_fmt = "txt"
+
     for cand in candidates:
         emit_event(
             "FORMAT_DETECTED",
@@ -194,7 +221,7 @@ def execute_traced_recovery(
                 carved: RecoveredArtifact = carve_candidate(content, cand)
                 if fmt in ("txt", "csv"):
                     emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
-                    recon_res = reconstruct_artifact(fmt, carved)
+                    recon_res = reconstruct_artifact(fmt, carved, detection_mode=detection_mode)
                     emit_event(
                         "RECONSTRUCTION_COMPLETED",
                         f"{fmt.upper()} reconstruction completed with status '{recon_res.status}'",
@@ -208,6 +235,17 @@ def execute_traced_recovery(
                     val_details_dict = asdict(val_res)
                     output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
                     score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+                    is_complete = assess_artifact_completeness(
+                        fmt=fmt,
+                        content=recon_res.recovered_bytes,
+                        detection_mode=detection_mode,
+                        validation_result=val_res,
+                        missing_bytes=miss_bytes,
+                        reconstructed_bytes=rec_byte_cnt,
+                    )
+                    if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0) and status_val == "FULLY_RECOVERED":
+                        status_val = "PARTIALLY_RECOVERED"
 
                     for idx_m, m in enumerate(recon_res.reconstruction_methods):
                         step = ReconstructionStep(
@@ -252,13 +290,21 @@ def execute_traced_recovery(
                         f"Structural validation {val_status_str}: {len(val_res.errors)} errors, {len(val_res.warnings)} warnings",
                     )
 
-                    eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=carved)
+                    is_complete = assess_artifact_completeness(
+                        fmt=fmt,
+                        content=carved.recovered_bytes,
+                        detection_mode=detection_mode,
+                        validation_result=val_res,
+                    )
+                    eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=carved, is_complete=is_complete)
                     emit_event(
                         "CONFIDENCE_CALCULATED",
                         f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
                     )
 
                     status_val = eval_res.status.value
+                    if (not is_complete) and status_val == "FULLY_RECOVERED":
+                        status_val = "PARTIALLY_RECOVERED"
                     ver_bytes = eval_res.provenance.verified_bytes
                     rec_byte_cnt = eval_res.provenance.reconstructed_bytes
                     miss_bytes = eval_res.provenance.missing_bytes
@@ -727,8 +773,8 @@ def execute_traced_recovery(
     # Scenario 3b: No signature candidates, but the evidence is TXT/CSV.
     # Runs deterministic fragment detection, fragment relationship identification,
     # and bounded-gap reconstruction. Operates on evidence bytes only.
-    elif filename.rsplit(".", 1)[-1].lower() in ("txt", "csv"):
-        target_fmt = filename.rsplit(".", 1)[-1].lower()
+    elif (filename.rsplit(".", 1)[-1].lower() in ("txt", "csv")) or forced_text_fmt is not None:
+        target_fmt = forced_text_fmt or filename.rsplit(".", 1)[-1].lower()
 
         emit_event(
             "FRAGMENT_DETECTION_STARTED",
@@ -797,6 +843,36 @@ def execute_traced_recovery(
                     )
                 )
             fragments.extend(fragment_objs)
+
+            # Record leading non-text bytes if any
+            lead_unatt = detected[0].offset
+            if lead_unatt > 0:
+                damage_regions.append(
+                    DamageRegion(
+                        region_id="damage-leading",
+                        start_offset=0,
+                        end_offset=lead_unatt,
+                        length=lead_unatt,
+                        type="MISSING",
+                        status="UNRECOVERABLE",
+                        affected_fragment_ids=[detected[0].fragment_id],
+                    )
+                )
+
+            # Record trailing non-text bytes if any
+            trail_unatt = len(content) - detected[-1].end_offset
+            if trail_unatt > 0:
+                damage_regions.append(
+                    DamageRegion(
+                        region_id="damage-trailing",
+                        start_offset=detected[-1].end_offset,
+                        end_offset=len(content),
+                        length=trail_unatt,
+                        type="MISSING",
+                        status="UNRECOVERABLE",
+                        affected_fragment_ids=[detected[-1].fragment_id],
+                    )
+                )
 
             if pairs:
                 frag_a, frag_b, rel = pairs[0]
@@ -894,10 +970,43 @@ def execute_traced_recovery(
                     f"between offset {frag_a.end_offset} and {frag_b.offset}",
                     relevant_fragment_ids=[rel.fragment_a_id, rel.fragment_b_id],
                 )
+            elif len(detected) >= 2:
+                # Multiple detected fragments without joinable pair
+                for i in range(len(detected) - 1):
+                    g_start = detected[i].end_offset
+                    g_end = detected[i + 1].offset
+                    g_len = max(0, g_end - g_start)
+                    if g_len > 0:
+                        damage_regions.append(
+                            DamageRegion(
+                                region_id=f"damage-gap-{i}",
+                                start_offset=g_start,
+                                end_offset=g_end,
+                                length=g_len,
+                                type="MISSING",
+                                status="UNRECOVERABLE",
+                                affected_fragment_ids=[detected[i].fragment_id, detected[i + 1].fragment_id],
+                            )
+                        )
+                ver_bytes = sum(f.length for f in detected)
+                rec_byte_cnt = 0
+                miss_bytes = max(0, len(content) - ver_bytes)
+                status_val = "PARTIALLY_RECOVERED"
+                merged_output = b"".join(f.data for f in detected)
+                val_res = validate_artifact(target_fmt, merged_output)
+                val_details_dict = asdict(val_res) if val_res else {}
+                score_breakdown_dict = {"total": 50.0 if (val_res and val_res.valid) else 20.0}
+                prov_dict = {
+                    "verified_bytes": ver_bytes,
+                    "reconstructed_bytes": 0,
+                    "missing_bytes": miss_bytes,
+                    "attributed_input_bytes": ver_bytes,
+                }
+                output_dict = {"recovered_bytes": merged_output.hex()}
             else:
                 # Single detected fragment: no seam is provable from the evidence,
                 # so no gap is claimed. Reconstruct the surviving text honestly.
-                recon_res = reconstruct_artifact(target_fmt, detected[0].data)
+                recon_res = reconstruct_artifact(target_fmt, detected[0].data, detection_mode=detection_mode)
                 emit_event(
                     "RECONSTRUCTION_COMPLETED",
                     f"{target_fmt.upper()} single-fragment reconstruction status "
@@ -978,6 +1087,18 @@ def execute_traced_recovery(
                     )
             prov_dict["evidence_size"] = len(content)
             prov_dict["missing_bytes"] = miss_bytes
+
+            is_complete = assess_artifact_completeness(
+                fmt=target_fmt,
+                content=bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content,
+                detection_mode=detection_mode,
+                validation_result=val_res,
+                missing_bytes=miss_bytes,
+                reconstructed_bytes=rec_byte_cnt,
+            )
+            if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0 or (detected and any(f.is_truncated for f in detected))) and status_val == "FULLY_RECOVERED":
+                status_val = "PARTIALLY_RECOVERED"
+
             total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
 
             # Structural validity alone must not yield full confidence. Scale it by
@@ -1005,13 +1126,23 @@ def execute_traced_recovery(
         if val_res.valid:
             fmt = target_fmt
             emit_event("VALIDATION_COMPLETED", f"Direct validation passed for '{fmt}'")
-            eval_res = evaluate_artifact_confidence(val_res, artifact=content)
+            is_complete = assess_artifact_completeness(
+                fmt=target_fmt,
+                content=content,
+                detection_mode=detection_mode,
+                validation_result=val_res,
+                missing_bytes=0,
+                reconstructed_bytes=0,
+            )
+            eval_res = evaluate_artifact_confidence(val_res, artifact=content, is_complete=is_complete)
             emit_event(
                 "CONFIDENCE_CALCULATED",
                 f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
             )
 
             status_val = eval_res.status.value
+            if (not is_complete) and status_val == "FULLY_RECOVERED":
+                status_val = "PARTIALLY_RECOVERED"
             ver_bytes = len(content)
             rec_byte_cnt = 0
             miss_bytes = 0
@@ -1035,7 +1166,7 @@ def execute_traced_recovery(
             )
             fragments.append(frag0)
         elif target_fmt == "txt" or ext == "txt":
-            recon_res = reconstruct_artifact("txt", content)
+            recon_res = reconstruct_artifact("txt", content, detection_mode=detection_mode)
             if recon_res.success:
                 fmt = "txt"
                 emit_event("RECONSTRUCTION_STARTED", "Attempting deterministic TXT format reconstruction on raw file")
@@ -1049,6 +1180,17 @@ def execute_traced_recovery(
                 val_details_dict = asdict(val_res)
                 output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
                 score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+                is_complete = assess_artifact_completeness(
+                    fmt="txt",
+                    content=recon_res.recovered_bytes,
+                    detection_mode=detection_mode,
+                    validation_result=val_res,
+                    missing_bytes=miss_bytes,
+                    reconstructed_bytes=rec_byte_cnt,
+                )
+                if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0) and status_val == "FULLY_RECOVERED":
+                    status_val = "PARTIALLY_RECOVERED"
 
                 frag0 = Fragment(
                     fragment_id="frag-0",
@@ -1223,13 +1365,21 @@ def execute_traced_recovery(
             if matched_fmt:
                 fmt = matched_fmt
                 emit_event("VALIDATION_COMPLETED", f"Direct validation passed for format '{fmt}'")
-                eval_res = evaluate_artifact_confidence(val_res, artifact=content)
+                is_complete = assess_artifact_completeness(
+                    fmt=fmt,
+                    content=content,
+                    detection_mode=detection_mode,
+                    validation_result=val_res,
+                )
+                eval_res = evaluate_artifact_confidence(val_res, artifact=content, is_complete=is_complete)
                 emit_event(
                     "CONFIDENCE_CALCULATED",
                     f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
                 )
 
                 status_val = eval_res.status.value
+                if (not is_complete) and status_val == "FULLY_RECOVERED":
+                    status_val = "PARTIALLY_RECOVERED"
                 ver_bytes = len(content)
                 # The evidence validated as-is, so nothing was reconstructed.
                 # Previously this counted every content byte as reconstructed,
@@ -1289,6 +1439,24 @@ def execute_traced_recovery(
                     f"Entire evidence buffer of {len(content)} bytes is severely corrupt/unrecoverable",
                 )
 
+    prov_dict["detection_mode"] = detection_mode
+
+    # Absolute final invariant guard:
+    # FULLY_RECOVERED is permitted ONLY when:
+    # R == 0, M == 0, structurally valid, and evidence is sufficient to establish a complete artifact.
+    output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content
+    is_complete_final = assess_artifact_completeness(
+        fmt=fmt,
+        content=output_raw,
+        detection_mode=detection_mode,
+        missing_bytes=miss_bytes,
+        reconstructed_bytes=rec_byte_cnt,
+    )
+    if (rec_byte_cnt > 0 or miss_bytes > 0 or not is_complete_final) and status_val == "FULLY_RECOVERED":
+        status_val = "PARTIALLY_RECOVERED"
+
+    total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
+
     emit_event("RECOVERY_COMPLETED", f"Recovery run completed with status '{status_val}'")
 
     completed_at = datetime.now(timezone.utc)
@@ -1313,6 +1481,7 @@ def execute_traced_recovery(
         confidence=score_breakdown_dict,
         provenance=prov_dict,
         output=output_dict,
+        detection_mode=detection_mode,
     )
 
     store.add_recovery_run(run)

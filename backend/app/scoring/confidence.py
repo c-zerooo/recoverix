@@ -162,23 +162,26 @@ def classify_recovery_status(
     score: int,
     reconstructed_bytes: int = 0,
     missing_bytes: int = 0,
+    is_complete: bool = True,
 ) -> RecoveryStatus:
     """Classify recovery status based on confidence score and critical override rules.
 
     Thresholds:
-      - 85–100 → FULLY_RECOVERED (Unless reconstructed_bytes > 0 or missing_bytes > 0)
+      - 85–100 → FULLY_RECOVERED (ONLY when is_complete is True, R == 0, and M == 0)
       - 50–84  → PARTIALLY_RECOVERED
       - 20–49  → CORRUPTED
       - 0–19   → UNRECOVERABLE
 
-    Critical Override Rule:
-      If reconstructed_bytes > 0 or missing_bytes > 0 and numeric threshold result is FULLY_RECOVERED,
-      it is strictly downgraded to PARTIALLY_RECOVERED. Otherwise, numeric threshold result is preserved.
+    Critical Override Rules:
+      - If reconstructed_bytes > 0 or missing_bytes > 0, status can NEVER be FULLY_RECOVERED.
+      - If completeness cannot be established (is_complete is False), status can NEVER be FULLY_RECOVERED.
+      - Any FULLY_RECOVERED classification without complete evidence is strictly downgraded to PARTIALLY_RECOVERED.
 
     Args:
         score: Numeric confidence score (0–100).
         reconstructed_bytes: Number of reconstructed bytes.
         missing_bytes: Number of unobserved/missing bytes.
+        is_complete: Whether evidence is sufficient to establish a complete artifact.
 
     Returns:
         RecoveryStatus enum value.
@@ -192,16 +195,16 @@ def classify_recovery_status(
     if missing_bytes < 0:
         raise ValueError(f"missing_bytes cannot be negative: {missing_bytes}")
 
-    if score >= 85:
+    if score >= 85 and is_complete and reconstructed_bytes == 0 and missing_bytes == 0:
         status = RecoveryStatus.FULLY_RECOVERED
-    elif score >= 50:
+    elif score >= 50 or (score >= 85 and (not is_complete or reconstructed_bytes > 0 or missing_bytes > 0)):
         status = RecoveryStatus.PARTIALLY_RECOVERED
     elif score >= 20:
         status = RecoveryStatus.CORRUPTED
     else:
         status = RecoveryStatus.UNRECOVERABLE
 
-    if (reconstructed_bytes > 0 or missing_bytes > 0) and status == RecoveryStatus.FULLY_RECOVERED:
+    if (reconstructed_bytes > 0 or missing_bytes > 0 or not is_complete) and status == RecoveryStatus.FULLY_RECOVERED:
         return RecoveryStatus.PARTIALLY_RECOVERED
 
     return status
@@ -281,6 +284,7 @@ def evaluate_artifact_confidence(
     actual_missing_bytes: Optional[int] = None,
     actual_verified_bytes: Optional[int] = None,
     actual_reconstructed_bytes: Optional[int] = None,
+    is_complete: bool = True,
 ) -> ConfidenceEvaluationResult:
     """Evaluate confidence breakdown, status classification, and provenance for an artifact.
 
@@ -292,6 +296,7 @@ def evaluate_artifact_confidence(
         actual_verified_bytes: Optional explicit count of surviving input evidence bytes.
         actual_reconstructed_bytes: Optional explicit count of deterministically
             reconstructed bytes added to the surviving evidence.
+        is_complete: Whether evidence is sufficient to establish a complete artifact.
 
     Returns:
         ConfidenceEvaluationResult combining breakdown, status, and provenance.
@@ -309,6 +314,7 @@ def evaluate_artifact_confidence(
         score=breakdown.total,
         reconstructed_bytes=provenance.reconstructed_bytes,
         missing_bytes=provenance.missing_bytes,
+        is_complete=is_complete,
     )
 
     return ConfidenceEvaluationResult(

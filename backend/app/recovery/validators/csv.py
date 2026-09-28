@@ -97,6 +97,18 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
                 body_start = start_pos + len(SYNTHETIC_START_MARKER)
                 body_bytes = raw_bytes[body_start:end_pos]
 
+    # Null byte rejection
+    if b"\x00" in raw_bytes:
+        errors.append("CSV content contains binary null bytes")
+        return ValidationResult(
+            valid=False,
+            format=fmt,
+            checks_performed=checks,
+            errors=errors,
+            warnings=warnings,
+            details=details,
+        )
+
     # UTF-8 decoding check
     try:
         body_text = body_bytes.decode("utf-8")
@@ -128,6 +140,9 @@ def validate_csv(data: bytes | RecoveredArtifact) -> ValidationResult:
                     rows = alt_rows
                     details["delimiter"] = delim
                     break
+
+            if all(len(r) == 1 for r in rows) and not any(d in body_text for d in (",", ";", "\t", "|")):
+                errors.append("CSV requires valid tabular structure with a recognized delimiter (, ; \\t |)")
 
         details["row_count"] = len(rows)
 

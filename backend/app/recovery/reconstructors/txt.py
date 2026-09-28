@@ -198,6 +198,7 @@ def _analyze_and_reconstruct_utf8(body_bytes: bytes) -> Tuple[bytes, int, int, i
 def reconstruct_txt(
     data: Union[bytes, bytearray, RecoveredArtifact],
     ground_truth: Optional[bytes] = None,
+    detection_mode: str = "known_file",
 ) -> ReconstructionResult:
     """Execute deterministic TXT format reconstruction on raw evidence or carved artifact.
 
@@ -330,16 +331,32 @@ def reconstruct_txt(
     # Validate output artifact
     val_result = validate_txt(recovered_output_bytes)
 
+    if start_pos != -1:
+        effective_detection_mode = "synthetic_harness"
+    else:
+        effective_detection_mode = detection_mode
+
+    from backend.app.recovery.completeness import assess_artifact_completeness
+    is_complete = assess_artifact_completeness(
+        fmt="txt",
+        content=recovered_output_bytes,
+        detection_mode=effective_detection_mode,
+        validation_result=val_result,
+        missing_bytes=total_missing,
+        reconstructed_bytes=total_reconstructed,
+    )
+
     # Evaluate confidence score & status
     eval_res = evaluate_artifact_confidence(
         validation_result=val_result,
         artifact=recovered_output_bytes,
         actual_missing_bytes=total_missing,
+        is_complete=is_complete,
     )
 
-    # Enforce status override: If reconstructed_bytes > 0 or missing_bytes > 0, status CANNOT be FULLY_RECOVERED
+    # Enforce status override: If reconstructed_bytes > 0 or missing_bytes > 0 or not complete, status CANNOT be FULLY_RECOVERED
     status_str = eval_res.status.value
-    if (total_reconstructed > 0 or total_missing > 0) and status_str == "FULLY_RECOVERED":
+    if (total_reconstructed > 0 or total_missing > 0 or not is_complete) and status_str == "FULLY_RECOVERED":
         status_str = "PARTIALLY_RECOVERED"
 
     # Determine ground truth hash match
