@@ -71,6 +71,7 @@ class PipelineEvent(BaseModel):
 class RecoveryRun(BaseModel):
     run_id: str
     artifact_id: Optional[str] = None
+    candidate_id: Optional[str] = None
     filename: str
     format: str
     status: str  # FULLY_RECOVERED, PARTIALLY_RECOVERED, CORRUPTED, UNRECOVERABLE

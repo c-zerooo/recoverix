@@ -6,6 +6,7 @@ bifragment reconstruction, structural validation, and confidence scoring.
 Generates structured RecoveryRun models, PipelineEvent sequence traces,
 Fragment representations, DamageRegions, and ReconstructionSteps.
 
+Supports both single-candidate and multi-candidate forensic recovery runs.
 Does NOT modify existing recovery logic or confidence algorithms.
 """
 
@@ -43,42 +44,12 @@ from backend.app.recovery.signatures import (
 from backend.app.recovery.completeness import assess_artifact_completeness
 
 
-def execute_traced_recovery(
-    filename: str,
-    content: bytes,
-    case_id: Optional[str] = None,
-    artifact_id: Optional[str] = None,
-    detection_mode: Optional[str] = None,
-) -> RecoveryRun:
-    """Execute a traced forensic recovery run over *content*.
 
-    Args:
-        filename: Name of the evidence file.
-        content: Raw evidence bytes.
-        case_id: Optional associated case identifier.
-        artifact_id: Optional associated artifact identifier.
-        detection_mode: Optional detection mode ('known_file', 'blind', 'synthetic_harness').
-
-    Returns:
-        Stored RecoveryRun instance containing the real forensic trace.
-    """
-    if detection_mode is None:
-        if SYNTHETIC_START_MARKER in content:
-            detection_mode = "synthetic_harness"
-        else:
-            ext_check = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-            if ext_check in ("txt", "csv", "json", "xml", "png", "jpg", "jpeg", "pdf") and not any(
-                filename.lower().startswith(prefix) for prefix in ("carved_", "blind_", "dump", "unallocated", "raw_")
-            ):
-                detection_mode = "known_file"
-            else:
-                detection_mode = "blind"
-
-    run_id = f"run_{uuid.uuid4().hex[:8]}"
+def _init_trace_context(run_id: str):
+    """Initialize sequence trace events and an event emission closure for a recovery run."""
     started_at = datetime.now(timezone.utc)
-
-    seq = 1
     events: List[PipelineEvent] = []
+    seq = 1
 
     def emit_event(
         event_type: str,
@@ -101,78 +72,929 @@ def execute_traced_recovery(
         )
         seq += 1
 
-    emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' ({len(content)} bytes)")
-    emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
+    return started_at, events, emit_event
 
-    candidates: List[Candidate] = scan_evidence(content)
 
-    # Resolve filename extension hint
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    ext_fmt_map = {
-        "txt": "txt",
-        "csv": "csv",
-        "json": "json",
-        "xml": "xml",
-        "png": "png",
-        "jpg": "jpeg",
-        "jpeg": "jpeg",
-        "pdf": "pdf",
-    }
-    ext_fmt = ext_fmt_map.get(ext)
+def _finalize_recovery_run(
+    *,
+    run_id: str,
+    started_at: datetime,
+    events: List[PipelineEvent],
+    emit_event: Any,
+    filename: str,
+    fmt: str,
+    candidate_id: Optional[str],
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    status_val: str,
+    ver_bytes: int,
+    rec_byte_cnt: int,
+    miss_bytes: int,
+    fragments: List[Fragment],
+    damage_regions: List[DamageRegion],
+    reconstruction_steps: List[ReconstructionStep],
+    val_details_dict: Dict[str, Any],
+    score_breakdown_dict: Dict[str, Any],
+    prov_dict: Dict[str, Any],
+    output_dict: Optional[Dict[str, Any]],
+    output_raw: bytes,
+    detection_mode: str,
+) -> RecoveryRun:
+    """Shared finalization helper: assesses completeness, enforces status guards, constructs and persists RecoveryRun."""
+    prov_dict["detection_mode"] = detection_mode
 
-    # Filter out spurious candidates when unambiguous evidence signatures or hints exist
-    if b"%PDF-" in content or ext_fmt == "pdf":
-        pdf_cands = [c for c in candidates if c.format == "pdf"]
-        if pdf_cands:
-            candidates = pdf_cands
-    elif PNG_SIGNATURE in content or ext_fmt == "png":
-        png_cands = [c for c in candidates if c.format == "png"]
-        if png_cands:
-            candidates = png_cands
-    elif ext_fmt in ("txt", "csv", "json") and not any(c.detection_method == "synthetic_boundary" for c in candidates):
-        matching_cands = [c for c in candidates if c.format == ext_fmt]
-        if matching_cands:
-            candidates = matching_cands
+    # Absolute final invariant guard:
+    # FULLY_RECOVERED is permitted ONLY when:
+    # R == 0, M == 0, structurally valid, and evidence is sufficient to establish a complete artifact.
+    is_complete_final = assess_artifact_completeness(
+        fmt=fmt,
+        content=output_raw,
+        detection_mode=detection_mode,
+        missing_bytes=miss_bytes,
+        reconstructed_bytes=rec_byte_cnt,
+    )
+    if (rec_byte_cnt > 0 or miss_bytes > 0 or not is_complete_final) and status_val == "FULLY_RECOVERED":
+        status_val = "PARTIALLY_RECOVERED"
+
+    total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
+    emit_event("RECOVERY_COMPLETED", f"Recovery run completed with status '{status_val}'")
+
+    completed_at = datetime.now(timezone.utc)
+    run = RecoveryRun(
+        run_id=run_id,
+        case_id=case_id,
+        artifact_id=artifact_id,
+        candidate_id=candidate_id,
+        filename=filename,
+        format=fmt,
+        status=status_val,
+        started_at=started_at,
+        completed_at=completed_at,
+        total_input_bytes=total_input_bytes,
+        total_verified_bytes=ver_bytes,
+        total_reconstructed_bytes=rec_byte_cnt,
+        total_missing_bytes=miss_bytes,
+        fragments=fragments,
+        damage_regions=damage_regions,
+        reconstruction_steps=reconstruction_steps,
+        events=events,
+        validation=val_details_dict,
+        confidence=score_breakdown_dict,
+        provenance=prov_dict,
+        output=output_dict,
+        detection_mode=detection_mode,
+    )
+    store.add_recovery_run(run)
+    return run
+
+
+def _rank_candidate(c: Any, ext_fmt: Optional[str] = None) -> tuple[int, int, int, int, int]:
+    """Heuristic rank for legacy primary candidate selection: matches extension, method, length, known end, and offset."""
+    ext_match = 1 if (ext_fmt and getattr(c, "format", None) == ext_fmt) else 0
+    method_score = {
+        "synthetic_boundary": 100,
+        "magic_bytes": 80,
+    }.get(getattr(c, "detection_method", ""), 50)
+    sig_len = getattr(c, "detected_header_length", 0)
+    has_end = 1 if getattr(c, "estimated_end_offset", None) is not None else 0
+    return (ext_match, method_score, sig_len, has_end, -getattr(c, "offset", 0))
+
+
+def _create_error_recovery_run(
+    *,
+    filename: str,
+    cand: Any,
+    error: Exception,
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    detection_mode: str = "known_file",
+) -> RecoveryRun:
+    """Constructs an isolated UNRECOVERABLE run when a candidate raises an unexpected exception."""
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    started_at, events, emit_event = _init_trace_context(run_id)
+    cand_id = getattr(cand, "candidate_id", None)
+    fmt = getattr(cand, "format", "unknown")
+
+    emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand_id}'")
+    emit_event("DAMAGE_DETECTED", f"Candidate execution failed with error: {error}")
+    emit_event("RECOVERY_COMPLETED", "Recovery run completed with status 'UNRECOVERABLE'")
+
+    completed_at = datetime.now(timezone.utc)
+    run = RecoveryRun(
+        run_id=run_id,
+        case_id=case_id,
+        artifact_id=artifact_id,
+        candidate_id=cand_id,
+        filename=filename,
+        format=fmt,
+        status="UNRECOVERABLE",
+        started_at=started_at,
+        completed_at=completed_at,
+        total_input_bytes=0,
+        total_verified_bytes=0,
+        total_reconstructed_bytes=0,
+        total_missing_bytes=0,
+        fragments=[],
+        damage_regions=[],
+        reconstruction_steps=[],
+        events=events,
+        validation={"error": str(error)},
+        confidence={"total": 0.0},
+        provenance={"detection_mode": detection_mode, "error": str(error)},
+        output=None,
+        detection_mode=detection_mode,
+    )
+    store.add_recovery_run(run)
+    return run
+
+
+def _recover_contiguous_candidate(
+    filename: str,
+    content: bytes,
+    cand: Candidate,
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    detection_mode: str = "known_file",
+) -> RecoveryRun:
+    """Execute traced recovery for a single contiguous candidate with known boundaries."""
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    started_at, events, emit_event = _init_trace_context(run_id)
+
+    emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
+    emit_event(
+        "FORMAT_DETECTED",
+        f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
+        relevant_artifact_info={"format": cand.format, "offset": cand.offset},
+    )
+    emit_event(
+        "CANDIDATE_FOUND",
+        f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
+        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+    )
+    fmt = cand.format
+    validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
+
+    frag_len = (cand.estimated_end_offset or len(content)) - cand.offset
+    frag0 = Fragment(
+        fragment_id="frag-0",
+        offset=cand.offset,
+        length=frag_len,
+        end_offset=cand.estimated_end_offset or len(content),
+        status="VERIFIED",
+        source="synthetic_boundary" if cand.detection_method == "synthetic_boundary" else "magic_bytes",
+        format=fmt,
+        verified_bytes=frag_len,
+        reconstructed_bytes=0,
+        missing_bytes=0,
+        validation_status="PASSED",
+    )
+    fragments: List[Fragment] = [frag0]
+    damage_regions: List[DamageRegion] = []
+    reconstruction_steps: List[ReconstructionStep] = []
+
+    status_val: str = "UNRECOVERABLE"
+    ver_bytes: int = 0
+    rec_byte_cnt: int = 0
+    miss_bytes: int = frag_len
+    score_breakdown_dict: Dict[str, Any] = {}
+    val_details_dict: Dict[str, Any] = {}
+    prov_dict: Dict[str, Any] = {}
+    output_dict: Optional[Dict[str, Any]] = None
+
+    emit_event(
+        "FRAGMENT_IDENTIFIED",
+        f"Identified contiguous fragment frag-0 [{cand.offset}..{cand.estimated_end_offset}] ({frag_len} bytes)",
+        relevant_fragment_ids=["frag-0"],
+    )
+
+    carved_bytes: bytes = b""
+    try:
+        carved: RecoveredArtifact = carve_candidate(content, cand)
+        carved_bytes = carved.recovered_bytes
+        if fmt in ("txt", "csv"):
+            emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
+            recon_res = reconstruct_artifact(fmt, carved, detection_mode=detection_mode)
+            emit_event(
+                "RECONSTRUCTION_COMPLETED",
+                f"{fmt.upper()} reconstruction completed with status '{recon_res.status}'",
+            )
+            status_val = recon_res.status
+            ver_bytes = recon_res.verified_bytes
+            rec_byte_cnt = recon_res.reconstructed_bytes
+            miss_bytes = recon_res.missing_bytes
+            val_res = recon_res.validation_result or validator(carved)
+            val_status_str = "PASSED" if val_res.valid else "FAILED"
+            val_details_dict = asdict(val_res)
+            output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
+            score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+            is_complete = assess_artifact_completeness(
+                fmt=fmt,
+                content=recon_res.recovered_bytes,
+                detection_mode=detection_mode,
+                validation_result=val_res,
+                missing_bytes=miss_bytes,
+                reconstructed_bytes=rec_byte_cnt,
+            )
+            if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0) and status_val == "FULLY_RECOVERED":
+                status_val = "PARTIALLY_RECOVERED"
+
+            for idx_m, m in enumerate(recon_res.reconstruction_methods):
+                step = ReconstructionStep(
+                    step_id=f"step-{idx_m}",
+                    method=m,
+                    input_fragment_ids=["frag-0"],
+                    gap_start=None,
+                    gap_end=None,
+                    gap_size=None,
+                    result="SUCCESS" if recon_res.success else "FAILED",
+                    verified_bytes=ver_bytes,
+                    reconstructed_bytes=rec_byte_cnt,
+                    missing_bytes=miss_bytes,
+                    validation_status=val_status_str,
+                    confidence=float(recon_res.details.get("confidence_score", 100.0)),
+                )
+                reconstruction_steps.append(step)
+
+            for idx_d, dmg in enumerate(recon_res.damage_regions):
+                damage_regions.append(
+                    DamageRegion(
+                        region_id=f"damage-{idx_d}",
+                        start_offset=dmg.get("offset", 0),
+                        end_offset=dmg.get("offset", 0) + dmg.get("length", 0),
+                        length=dmg.get("length", 0),
+                        type=dmg.get("type", "CORRUPTED"),
+                        status="RECONSTRUCTED" if recon_res.success else "UNRECOVERABLE",
+                        affected_fragment_ids=["frag-0"],
+                    )
+                )
+                emit_event(
+                    "DAMAGE_DETECTED",
+                    f"Detected damage region ({dmg.get('type')}) of {dmg.get('length')} bytes at offset {dmg.get('offset')}",
+                    relevant_fragment_ids=["frag-0"],
+                )
         else:
-            candidates = []
+            emit_event("VALIDATION_STARTED", f"Validating structural integrity for format '{fmt}'")
+            val_res = validator(carved)
+            val_status_str = "PASSED" if val_res.valid else "FAILED"
+            emit_event(
+                "VALIDATION_COMPLETED",
+                f"Structural validation {val_status_str}: {len(val_res.errors)} errors, {len(val_res.warnings)} warnings",
+            )
 
-    def _rank_candidate(c: Candidate) -> tuple[int, int, int, int, int]:
-        ext_match = 1 if (ext_fmt and c.format == ext_fmt) else 0
-        method_score = {
-            "synthetic_boundary": 100,
-            "magic_bytes": 80,
-        }.get(c.detection_method, 50)
-        sig_len = c.detected_header_length
-        has_end = 1 if c.estimated_end_offset is not None else 0
-        return (ext_match, method_score, sig_len, has_end, -c.offset)
+            is_complete = assess_artifact_completeness(
+                fmt=fmt,
+                content=carved.recovered_bytes,
+                detection_mode=detection_mode,
+                validation_result=val_res,
+            )
+            eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=carved, is_complete=is_complete)
+            emit_event(
+                "CONFIDENCE_CALCULATED",
+                f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
+            )
 
-    if candidates:
-        candidates.sort(key=_rank_candidate, reverse=True)
+            status_val = eval_res.status.value
+            if (not is_complete) and status_val == "FULLY_RECOVERED":
+                status_val = "PARTIALLY_RECOVERED"
+            ver_bytes = eval_res.provenance.verified_bytes
+            rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+            miss_bytes = eval_res.provenance.missing_bytes
+            score_breakdown_dict = asdict(eval_res.score_breakdown)
+            val_details_dict = asdict(val_res)
+            prov_dict = asdict(eval_res.provenance)
+            output_dict = {"recovered_bytes": carved.recovered_bytes.hex()}
 
-    forced_text_fmt: Optional[str] = None
-    if not any(c.detection_method == "synthetic_boundary" for c in candidates):
-        if not (b"%PDF-" in content or PNG_SIGNATURE in content or content.startswith(b"\xff\xd8") or content.startswith(b"<?xml")):
-            probe_csv = detect_text_fragments(content, "csv")
-            probe_txt = detect_text_fragments(content, "txt")
-            if len(probe_csv) >= 2 and (ext_fmt == "csv" or not ext_fmt):
-                candidates = []
-                forced_text_fmt = "csv"
-            elif len(probe_txt) >= 2 and (ext_fmt == "txt" or not ext_fmt):
-                candidates = []
-                forced_text_fmt = "txt"
+        frag0_updated = frag0.model_copy(
+            update={
+                "verified_bytes": ver_bytes,
+                "reconstructed_bytes": rec_byte_cnt,
+                "missing_bytes": miss_bytes,
+                "validation_status": val_status_str,
+            }
+        )
+        fragments[0] = frag0_updated
+    except Exception as e:
+        val_details_dict = {"error": str(e)}
 
-    for cand in candidates:
+    output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else carved_bytes
+    return _finalize_recovery_run(
+        run_id=run_id,
+        started_at=started_at,
+        events=events,
+        emit_event=emit_event,
+        filename=filename,
+        fmt=fmt,
+        candidate_id=getattr(cand, "candidate_id", None),
+        case_id=case_id,
+        artifact_id=artifact_id,
+        status_val=status_val,
+        ver_bytes=ver_bytes,
+        rec_byte_cnt=rec_byte_cnt,
+        miss_bytes=miss_bytes,
+        fragments=fragments,
+        damage_regions=damage_regions,
+        reconstruction_steps=reconstruction_steps,
+        val_details_dict=val_details_dict,
+        score_breakdown_dict=score_breakdown_dict,
+        prov_dict=prov_dict,
+        output_dict=output_dict,
+        output_raw=output_raw,
+        detection_mode=detection_mode,
+    )
+
+
+def _recover_bifragment_candidate_pair(
+    filename: str,
+    content: bytes,
+    cand: Candidate,
+    cand2: Candidate,
+    case_id: Optional[str] = None,
+    detection_mode: str = "known_file",
+) -> RecoveryRun:
+    """Execute traced recovery for a bifragment candidate pair of matching formats."""
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    started_at, events, emit_event = _init_trace_context(run_id)
+
+    emit_event(
+        "RECOVERY_STARTED",
+        f"Started recovery run for '{filename}' bifragment pair '{cand.candidate_id}' + '{cand2.candidate_id}'",
+    )
+    emit_event(
+        "FORMAT_DETECTED",
+        f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
+        relevant_artifact_info={"format": cand.format, "offset": cand.offset},
+    )
+    emit_event(
+        "CANDIDATE_FOUND",
+        f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
+        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+    )
+    emit_event(
+        "FORMAT_DETECTED",
+        f"Detected format signature '{cand2.format}' at byte offset {cand2.offset}",
+        relevant_artifact_info={"format": cand2.format, "offset": cand2.offset},
+    )
+    emit_event(
+        "CANDIDATE_FOUND",
+        f"Candidate '{cand2.candidate_id}' located at offset {cand2.offset} via {cand2.detection_method}",
+        relevant_artifact_info={"candidate_id": cand2.candidate_id, "offset": cand2.offset},
+    )
+    fmt = cand.format
+    validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
+
+    raw_between = content[cand.offset:cand2.offset]
+    frag_a_bytes = raw_between.rstrip(b"\x00")
+    if not frag_a_bytes:
+        frag_a_bytes = raw_between
+
+    frag_a_end = cand.offset + len(frag_a_bytes)
+    frag_a_len = frag_a_end - cand.offset
+    gap_start = frag_a_end
+    gap_end = cand2.offset
+    gap_size = max(0, gap_end - gap_start)
+
+    frag_a = Fragment(
+        fragment_id="frag-0",
+        offset=cand.offset,
+        length=frag_a_len,
+        end_offset=frag_a_end,
+        status="PARTIAL",
+        source="bifragment_a",
+        format=fmt,
+        verified_bytes=frag_a_len,
+        reconstructed_bytes=0,
+        missing_bytes=0,
+        validation_status="PARTIAL",
+    )
+
+    frag_b_len = len(content) - cand2.offset
+    frag_b = Fragment(
+        fragment_id="frag-1",
+        offset=cand2.offset,
+        length=frag_b_len,
+        end_offset=len(content),
+        status="PARTIAL",
+        source="bifragment_b",
+        format=fmt,
+        verified_bytes=frag_b_len,
+        reconstructed_bytes=0,
+        missing_bytes=0,
+        validation_status="PARTIAL",
+    )
+
+    rel_ab = FragmentRelationship(
+        source_fragment_id="frag-0",
+        target_fragment_id="frag-1",
+        relationship_type="BOUNDED_GAP",
+        details={"gap_size": gap_size},
+    )
+    frag_a_rel = frag_a.model_copy(update={"relationships": [rel_ab]})
+    fragments: List[Fragment] = [frag_a_rel, frag_b]
+
+    emit_event(
+        "FRAGMENT_IDENTIFIED",
+        f"Identified bifragment frag-0 [{cand.offset}..{frag_a_end}] and frag-1 [{cand2.offset}..{len(content)}]",
+        relevant_fragment_ids=["frag-0", "frag-1"],
+    )
+
+    damage_regions: List[DamageRegion] = []
+    reconstruction_steps: List[ReconstructionStep] = []
+
+    dam0 = DamageRegion(
+        region_id="damage-0",
+        start_offset=gap_start,
+        end_offset=gap_end,
+        length=gap_size,
+        type="MISSING",
+        status="RECONSTRUCTABLE",
+        affected_fragment_ids=["frag-0", "frag-1"],
+    )
+    damage_regions.append(dam0)
+    emit_event(
+        "DAMAGE_DETECTED",
+        f"Detected missing gap of {gap_size} bytes between offset {gap_start} and {gap_end}",
+        relevant_fragment_ids=["frag-0", "frag-1"],
+    )
+
+    emit_event(
+        "RECONSTRUCTION_STARTED",
+        f"Attempting bifragment gap reconstruction (gap size bounds: 1 to 4096)",
+        relevant_fragment_ids=["frag-0", "frag-1"],
+    )
+
+    status_val: str = "UNRECOVERABLE"
+    ver_bytes: int = 0
+    rec_byte_cnt: int = 0
+    miss_bytes: int = gap_size
+    score_breakdown_dict: Dict[str, Any] = {}
+    val_details_dict: Dict[str, Any] = {}
+    prov_dict: Dict[str, Any] = {}
+    output_dict: Optional[Dict[str, Any]] = None
+
+    try:
+        frag_b_bytes = content[cand2.offset:]
+        recon_res = reconstruct_bifragment(
+            frag_a_bytes, frag_b_bytes, validator=validator, min_gap=1, max_gap=4096
+        )
+
+        rec_success = recon_res.success
         emit_event(
-            "FORMAT_DETECTED",
-            f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
-            relevant_artifact_info={"format": cand.format, "offset": cand.offset},
+            "RECONSTRUCTION_COMPLETED",
+            f"Bifragment reconstruction {'succeeded' if rec_success else 'failed'}",
+            relevant_fragment_ids=["frag-0", "frag-1"],
+        )
+
+        val_res_for_eval = recon_res.validation_result if (recon_res and recon_res.validation_result) else validator(frag_a_bytes + frag_b_bytes)
+        eval_res = evaluate_artifact_confidence(
+            validation_result=val_res_for_eval,
+            reconstruction_result=recon_res,
+            actual_missing_bytes=gap_size,
         )
         emit_event(
-            "CANDIDATE_FOUND",
-            f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
-            relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+            "CONFIDENCE_CALCULATED",
+            f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
         )
 
+        status_val = eval_res.status.value
+        # If multiple gaps validated with preserve_ambiguity=True, gap_size is None
+        if recon_res.gap_size is None and rec_success:
+            if status_val == "FULLY_RECOVERED":
+                status_val = "PARTIALLY_RECOVERED"
+
+        ver_bytes = eval_res.provenance.verified_bytes
+        rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+        miss_bytes = eval_res.provenance.missing_bytes
+
+        score_breakdown_dict = asdict(eval_res.score_breakdown)
+        val_details_dict = asdict(val_res_for_eval)
+        prov_dict = asdict(eval_res.provenance)
+        output_bytes = (recon_res.fragment_a_bytes + recon_res.fragment_b_bytes) if (recon_res and hasattr(recon_res, "fragment_a_bytes")) else (frag_a_bytes + frag_b_bytes)
+        output_dict = {"recovered_bytes": output_bytes.hex()}
+
+        step0 = ReconstructionStep(
+            step_id="step-0",
+            method="BIFRAGMENT_GAP",
+            input_fragment_ids=["frag-0", "frag-1"],
+            gap_start=gap_start,
+            gap_end=gap_end,
+            gap_size=gap_size,
+            validated_gap_size=recon_res.gap_size if (rec_success and recon_res.gap_size is not None) else None,
+            result="SUCCESS" if rec_success else "FAILED",
+            verified_bytes=ver_bytes,
+            reconstructed_bytes=rec_byte_cnt,
+            missing_bytes=miss_bytes,
+            validation_status="PASSED" if (recon_res.validation_result and recon_res.validation_result.valid) else "FAILED",
+            confidence=float(eval_res.score_breakdown.total),
+        )
+        reconstruction_steps.append(step0)
+
+        dam0_updated = dam0.model_copy(
+            update={"status": "RECONSTRUCTED" if (rec_success and recon_res.gap_size is not None) else "UNRECOVERABLE"}
+        )
+        damage_regions[0] = dam0_updated
+    except Exception as e:
+        val_details_dict = {"error": str(e)}
+
+    output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else (frag_a_bytes + frag_b_bytes)
+    return _finalize_recovery_run(
+        run_id=run_id,
+        started_at=started_at,
+        events=events,
+        emit_event=emit_event,
+        filename=filename,
+        fmt=fmt,
+        candidate_id=getattr(cand, "candidate_id", None),
+        case_id=case_id,
+        artifact_id=None,
+        status_val=status_val,
+        ver_bytes=ver_bytes,
+        rec_byte_cnt=rec_byte_cnt,
+        miss_bytes=miss_bytes,
+        fragments=fragments,
+        damage_regions=damage_regions,
+        reconstruction_steps=reconstruction_steps,
+        val_details_dict=val_details_dict,
+        score_breakdown_dict=score_breakdown_dict,
+        prov_dict=prov_dict,
+        output_dict=output_dict,
+        output_raw=output_raw,
+        detection_mode=detection_mode,
+    )
+
+
+def _recover_standalone_candidate(
+    filename: str,
+    content: bytes,
+    cand: Candidate,
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    detection_mode: str = "known_file",
+    next_offset: Optional[int] = None,
+) -> RecoveryRun:
+    """Execute traced recovery for a single candidate without estimated end offset."""
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    started_at, events, emit_event = _init_trace_context(run_id)
+
+    emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
+    emit_event(
+        "FORMAT_DETECTED",
+        f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
+        relevant_artifact_info={"format": cand.format, "offset": cand.offset},
+    )
+    emit_event(
+        "CANDIDATE_FOUND",
+        f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
+        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+    )
+    fmt = cand.format
+    validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
+
+    bound_end = next_offset if (next_offset is not None and next_offset > cand.offset) else len(content)
+    raw_frag_len = bound_end - cand.offset
+
+    frag0 = Fragment(
+        fragment_id="frag-0",
+        offset=cand.offset,
+        length=raw_frag_len,
+        end_offset=bound_end,
+        status="PARTIAL",
+        source="magic_bytes" if cand.detection_method == "magic_bytes" else "synthetic_boundary",
+        format=fmt,
+        verified_bytes=raw_frag_len,
+        reconstructed_bytes=0,
+        missing_bytes=0,
+        validation_status="UNTESTED",
+    )
+    fragments: List[Fragment] = [frag0]
+    damage_regions: List[DamageRegion] = []
+    reconstruction_steps: List[ReconstructionStep] = []
+
+    status_val: str = "UNRECOVERABLE"
+    ver_bytes: int = 0
+    rec_byte_cnt: int = 0
+    miss_bytes: int = raw_frag_len
+    score_breakdown_dict: Dict[str, Any] = {}
+    val_details_dict: Dict[str, Any] = {}
+    prov_dict: Dict[str, Any] = {}
+    output_dict: Optional[Dict[str, Any]] = None
+    total_input_bytes: int = raw_frag_len
+
+    emit_event(
+        "FRAGMENT_IDENTIFIED",
+        f"Identified candidate fragment frag-0 [{cand.offset}..{bound_end}] ({raw_frag_len} bytes)",
+        relevant_fragment_ids=["frag-0"],
+    )
+
+    if fmt == "txt":
+        raw_bytes = content[cand.offset:bound_end]
+        emit_event("RECONSTRUCTION_STARTED", "Attempting deterministic TXT format reconstruction")
+        recon_res = reconstruct_artifact("txt", raw_bytes)
+        emit_event(
+            "RECONSTRUCTION_COMPLETED",
+            f"TXT reconstruction completed with status '{recon_res.status}'",
+        )
+        status_val = recon_res.status
+        ver_bytes = recon_res.verified_bytes
+        rec_byte_cnt = recon_res.reconstructed_bytes
+        miss_bytes = recon_res.missing_bytes
+        val_res = recon_res.validation_result or validator(raw_bytes)
+        val_status_str = "PASSED" if val_res.valid else "FAILED"
+        val_details_dict = asdict(val_res)
+        output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
+        score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+        for idx_m, m in enumerate(recon_res.reconstruction_methods):
+            step = ReconstructionStep(
+                step_id=f"step-{idx_m}",
+                method=m,
+                input_fragment_ids=["frag-0"],
+                gap_start=None,
+                gap_end=None,
+                gap_size=None,
+                result="SUCCESS" if recon_res.success else "FAILED",
+                verified_bytes=ver_bytes,
+                reconstructed_bytes=rec_byte_cnt,
+                missing_bytes=miss_bytes,
+                validation_status=val_status_str,
+                confidence=float(recon_res.details.get("confidence_score", 100.0)),
+            )
+            reconstruction_steps.append(step)
+
+        for idx_d, dmg in enumerate(recon_res.damage_regions):
+            damage_regions.append(
+                DamageRegion(
+                    region_id=f"damage-{idx_d}",
+                    start_offset=dmg.get("offset", 0),
+                    end_offset=dmg.get("offset", 0) + dmg.get("length", 0),
+                    length=dmg.get("length", 0),
+                    type=dmg.get("type", "CORRUPTED"),
+                    status="RECONSTRUCTED" if recon_res.success else "UNRECOVERABLE",
+                    affected_fragment_ids=["frag-0"],
+                )
+            )
+            emit_event(
+                "DAMAGE_DETECTED",
+                f"Detected damage region ({dmg.get('type')}) of {dmg.get('length')} bytes at offset {dmg.get('offset')}",
+                relevant_fragment_ids=["frag-0"],
+            )
+
+    elif fmt == "pdf":
+        raw_bytes = content[cand.offset:]
+        val_initial = validator(raw_bytes)
+
+        shuffled_recovered = False
+        if cand.offset > 0 and b"%%EOF" in content[:cand.offset]:
+            candidate_unshuffled = content[cand.offset:] + content[:cand.offset]
+            val_unshuffled = validator(candidate_unshuffled)
+            if not val_unshuffled.valid and (b"xref" not in candidate_unshuffled or any("xref" in e.lower() for e in val_unshuffled.errors)):
+                rebuilt_unshuffled, xref_ok = reconstruct_pdf_xref(candidate_unshuffled)
+                if xref_ok:
+                    candidate_unshuffled = rebuilt_unshuffled
+                    val_unshuffled = validator(candidate_unshuffled)
+
+            if val_unshuffled.valid:
+                shuffled_recovered = True
+                emit_event(
+                    "RECONSTRUCTION_STARTED",
+                    "Detected shuffled PDF fragments; executing deterministic un-shuffle reconstruction",
+                )
+                emit_event(
+                    "RECONSTRUCTION_COMPLETED",
+                    "Shuffled PDF fragments reordered and structurally validated",
+                )
+                header_frag_len = len(content) - cand.offset
+                trailer_frag_len = cand.offset
+
+                f_head = Fragment(
+                    fragment_id="frag-0",
+                    offset=cand.offset,
+                    length=header_frag_len,
+                    end_offset=len(content),
+                    status="VERIFIED",
+                    source="shuffled_header",
+                    format="pdf",
+                    verified_bytes=header_frag_len,
+                    reconstructed_bytes=0,
+                    missing_bytes=0,
+                    validation_status="PASSED",
+                )
+                f_tail = Fragment(
+                    fragment_id="frag-1",
+                    offset=0,
+                    length=trailer_frag_len,
+                    end_offset=cand.offset,
+                    status="VERIFIED",
+                    source="shuffled_trailer",
+                    format="pdf",
+                    verified_bytes=trailer_frag_len,
+                    reconstructed_bytes=0,
+                    missing_bytes=0,
+                    validation_status="PASSED",
+                )
+                rel = FragmentRelationship(
+                    source_fragment_id="frag-0",
+                    target_fragment_id="frag-1",
+                    relationship_type="SHUFFLED_SEQUENCE",
+                    details={"unshuffle_offset": cand.offset},
+                )
+                f_head = f_head.model_copy(update={"relationships": [rel]})
+                fragments.clear()
+                fragments.extend([f_head, f_tail])
+
+                step0 = ReconstructionStep(
+                    step_id="step-0",
+                    method="FRAGMENT_UNSHUFFLE",
+                    input_fragment_ids=["frag-0", "frag-1"],
+                    gap_start=None,
+                    gap_end=None,
+                    gap_size=None,
+                    result="SUCCESS",
+                    verified_bytes=len(content),
+                    reconstructed_bytes=0,
+                    missing_bytes=0,
+                    validation_status="PASSED",
+                    confidence=100.0,
+                )
+                reconstruction_steps.append(step0)
+
+                eval_res = evaluate_artifact_confidence(
+                    validation_result=val_unshuffled,
+                    artifact=candidate_unshuffled,
+                    actual_verified_bytes=len(content),
+                    actual_reconstructed_bytes=0,
+                    actual_missing_bytes=0,
+                )
+                status_val = eval_res.status.value
+                ver_bytes = eval_res.provenance.verified_bytes
+                rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+                miss_bytes = eval_res.provenance.missing_bytes
+                total_input_bytes = len(content)
+                score_breakdown_dict = asdict(eval_res.score_breakdown)
+                val_details_dict = asdict(val_unshuffled)
+                prov_dict = asdict(eval_res.provenance)
+                prov_dict["evidence_size"] = len(content)
+                prov_dict["reconstruction_method"] = "FRAGMENT_UNSHUFFLE"
+                output_dict = {"recovered_bytes": candidate_unshuffled.hex()}
+
+        if not shuffled_recovered and (not val_initial.valid and b"xref" not in raw_bytes or any("xref" in e.lower() for e in val_initial.errors)):
+            emit_event(
+                "DAMAGE_DETECTED",
+                "Detected damaged or missing PDF cross-reference table (xref)",
+                relevant_fragment_ids=["frag-0"],
+            )
+            dam0 = DamageRegion(
+                region_id="damage-0",
+                start_offset=cand.offset,
+                end_offset=bound_end,
+                length=raw_frag_len,
+                type="CORRUPTED",
+                status="RECONSTRUCTABLE",
+                affected_fragment_ids=["frag-0"],
+            )
+            damage_regions.append(dam0)
+
+            emit_event(
+                "RECONSTRUCTION_STARTED",
+                "Attempting deterministic PDF cross-reference (xref) reconstruction",
+                relevant_fragment_ids=["frag-0"],
+            )
+
+            rebuilt_bytes, xref_ok = reconstruct_pdf_xref(raw_bytes)
+            emit_event(
+                "RECONSTRUCTION_COMPLETED",
+                f"PDF xref reconstruction {'succeeded' if xref_ok else 'failed'}",
+                relevant_fragment_ids=["frag-0"],
+            )
+
+            if xref_ok:
+                carved_rebuilt = RecoveredArtifact(
+                    candidate_id=cand.candidate_id,
+                    format="pdf",
+                    mime_type="application/pdf",
+                    category="document",
+                    source_offset=cand.offset,
+                    recovered_bytes=rebuilt_bytes,
+                    recovered_byte_count=len(rebuilt_bytes),
+                    carving_method="XREF_RECONSTRUCTED",
+                )
+                val_res = validator(carved_rebuilt)
+                pdf_input_bytes = len(raw_bytes)
+                pdf_reconstructed_bytes = max(0, len(rebuilt_bytes) - pdf_input_bytes)
+                pdf_missing_bytes = max(0, pdf_input_bytes - len(rebuilt_bytes))
+                pdf_verified_bytes = pdf_input_bytes - pdf_missing_bytes
+                eval_res = evaluate_artifact_confidence(
+                    validation_result=val_res,
+                    artifact=carved_rebuilt,
+                    actual_verified_bytes=pdf_verified_bytes,
+                    actual_reconstructed_bytes=pdf_reconstructed_bytes,
+                    actual_missing_bytes=pdf_missing_bytes,
+                )
+
+                status_val = eval_res.status.value
+                ver_bytes = eval_res.provenance.verified_bytes
+                rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+                miss_bytes = eval_res.provenance.missing_bytes
+                total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
+                score_breakdown_dict = asdict(eval_res.score_breakdown)
+                val_details_dict = asdict(val_res)
+                prov_dict = asdict(eval_res.provenance)
+                prov_dict["evidence_size"] = len(content)
+                output_dict = {"recovered_bytes": rebuilt_bytes.hex()}
+
+                step0 = ReconstructionStep(
+                    step_id="step-0",
+                    method="XREF_RECONSTRUCTION",
+                    input_fragment_ids=["frag-0"],
+                    gap_start=None,
+                    gap_end=None,
+                    gap_size=None,
+                    result="SUCCESS",
+                    verified_bytes=ver_bytes,
+                    reconstructed_bytes=rec_byte_cnt,
+                    validation_status="PASSED" if val_res.valid else "FAILED",
+                    confidence=float(eval_res.score_breakdown.total),
+                )
+                reconstruction_steps.append(step0)
+                damage_regions[0] = dam0.model_copy(update={"status": "RECONSTRUCTED"})
+            else:
+                val_res = val_initial
+                eval_res = evaluate_artifact_confidence(val_res)
+                status_val = eval_res.status.value
+                ver_bytes = eval_res.provenance.verified_bytes
+                rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+                miss_bytes = eval_res.provenance.missing_bytes
+                score_breakdown_dict = asdict(eval_res.score_breakdown)
+                val_details_dict = asdict(val_res)
+                prov_dict = asdict(eval_res.provenance)
+                output_dict = {"recovered_bytes": raw_bytes.hex()}
+
+    if not reconstruction_steps and status_val == "UNRECOVERABLE":
+        try:
+            raw_frag = content[cand.offset:bound_end]
+            emit_event("VALIDATION_STARTED", f"Validating format '{fmt}' on raw fragment")
+            val_res = validator(raw_frag)
+            val_status_str = "PASSED" if val_res.valid else "FAILED"
+            emit_event("VALIDATION_COMPLETED", f"Validation {val_status_str}")
+
+            eval_res = evaluate_artifact_confidence(val_res, artifact=raw_frag)
+            emit_event(
+                "CONFIDENCE_CALCULATED",
+                f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
+            )
+
+            status_val = eval_res.status.value
+            ver_bytes = eval_res.provenance.verified_bytes
+            rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+            miss_bytes = eval_res.provenance.missing_bytes
+            score_breakdown_dict = asdict(eval_res.score_breakdown)
+            val_details_dict = asdict(val_res)
+            prov_dict = asdict(eval_res.provenance)
+            output_dict = {"recovered_bytes": raw_frag.hex()}
+        except Exception as e:
+            val_details_dict = {"error": str(e)}
+
+    output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content[cand.offset:bound_end]
+    return _finalize_recovery_run(
+        run_id=run_id,
+        started_at=started_at,
+        events=events,
+        emit_event=emit_event,
+        filename=filename,
+        fmt=fmt,
+        candidate_id=getattr(cand, "candidate_id", None),
+        case_id=case_id,
+        artifact_id=artifact_id,
+        status_val=status_val,
+        ver_bytes=ver_bytes,
+        rec_byte_cnt=rec_byte_cnt,
+        miss_bytes=miss_bytes,
+        fragments=fragments,
+        damage_regions=damage_regions,
+        reconstruction_steps=reconstruction_steps,
+        val_details_dict=val_details_dict,
+        score_breakdown_dict=score_breakdown_dict,
+        prov_dict=prov_dict,
+        output_dict=output_dict,
+        output_raw=output_raw,
+        detection_mode=detection_mode,
+    )
+
+
+def _recover_direct_fallback(
+    filename: str,
+    content: bytes,
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    detection_mode: str = "known_file",
+    forced_text_fmt: Optional[str] = None,
+) -> RecoveryRun:
+    """Execute direct fallback recovery when zero candidates are detected."""
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    started_at, events, emit_event = _init_trace_context(run_id)
+
+    emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}'")
+    emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
     fragments: List[Fragment] = []
     damage_regions: List[DamageRegion] = []
     reconstruction_steps: List[ReconstructionStep] = []
@@ -188,592 +1010,8 @@ def execute_traced_recovery(
     output_dict: Optional[Dict[str, Any]] = None
     total_input_bytes: int = len(content)
 
-    if candidates:
-        cand = candidates[0]
-        fmt = cand.format
-        validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
-
-
-        # Scenario 1: Candidate with known end offset (Contiguous carved artifact)
-        if cand.estimated_end_offset is not None:
-            frag_len = cand.estimated_end_offset - cand.offset
-            frag0 = Fragment(
-                fragment_id="frag-0",
-                offset=cand.offset,
-                length=frag_len,
-                end_offset=cand.estimated_end_offset,
-                status="VERIFIED",
-                source="synthetic_boundary" if cand.detection_method == "synthetic_boundary" else "magic_bytes",
-                format=fmt,
-                verified_bytes=frag_len,
-                reconstructed_bytes=0,
-                missing_bytes=0,
-                validation_status="PASSED",
-            )
-            fragments.append(frag0)
-            emit_event(
-                "FRAGMENT_IDENTIFIED",
-                f"Identified contiguous fragment frag-0 [{cand.offset}..{cand.estimated_end_offset}] ({frag_len} bytes)",
-                relevant_fragment_ids=["frag-0"],
-            )
-
-            try:
-                carved: RecoveredArtifact = carve_candidate(content, cand)
-                if fmt in ("txt", "csv"):
-                    emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
-                    recon_res = reconstruct_artifact(fmt, carved, detection_mode=detection_mode)
-                    emit_event(
-                        "RECONSTRUCTION_COMPLETED",
-                        f"{fmt.upper()} reconstruction completed with status '{recon_res.status}'",
-                    )
-                    status_val = recon_res.status
-                    ver_bytes = recon_res.verified_bytes
-                    rec_byte_cnt = recon_res.reconstructed_bytes
-                    miss_bytes = recon_res.missing_bytes
-                    val_res = recon_res.validation_result or validator(carved)
-                    val_status_str = "PASSED" if val_res.valid else "FAILED"
-                    val_details_dict = asdict(val_res)
-                    output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
-                    score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
-
-                    is_complete = assess_artifact_completeness(
-                        fmt=fmt,
-                        content=recon_res.recovered_bytes,
-                        detection_mode=detection_mode,
-                        validation_result=val_res,
-                        missing_bytes=miss_bytes,
-                        reconstructed_bytes=rec_byte_cnt,
-                    )
-                    if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0) and status_val == "FULLY_RECOVERED":
-                        status_val = "PARTIALLY_RECOVERED"
-
-                    for idx_m, m in enumerate(recon_res.reconstruction_methods):
-                        step = ReconstructionStep(
-                            step_id=f"step-{idx_m}",
-                            method=m,
-                            input_fragment_ids=["frag-0"],
-                            gap_start=None,
-                            gap_end=None,
-                            gap_size=None,
-                            result="SUCCESS" if recon_res.success else "FAILED",
-                            verified_bytes=ver_bytes,
-                            reconstructed_bytes=rec_byte_cnt,
-                            missing_bytes=miss_bytes,
-                            validation_status=val_status_str,
-                            confidence=float(recon_res.details.get("confidence_score", 100.0)),
-                        )
-                        reconstruction_steps.append(step)
-
-                    for idx_d, dmg in enumerate(recon_res.damage_regions):
-                        damage_regions.append(
-                            DamageRegion(
-                                region_id=f"damage-{idx_d}",
-                                start_offset=dmg.get("offset", 0),
-                                end_offset=dmg.get("offset", 0) + dmg.get("length", 0),
-                                length=dmg.get("length", 0),
-                                type=dmg.get("type", "CORRUPTED"),
-                                status="RECONSTRUCTED" if recon_res.success else "UNRECOVERABLE",
-                                affected_fragment_ids=["frag-0"],
-                            )
-                        )
-                        emit_event(
-                            "DAMAGE_DETECTED",
-                            f"Detected damage region ({dmg.get('type')}) of {dmg.get('length')} bytes at offset {dmg.get('offset')}",
-                            relevant_fragment_ids=["frag-0"],
-                        )
-                else:
-                    emit_event("VALIDATION_STARTED", f"Validating structural integrity for format '{fmt}'")
-                    val_res = validator(carved)
-                    val_status_str = "PASSED" if val_res.valid else "FAILED"
-                    emit_event(
-                        "VALIDATION_COMPLETED",
-                        f"Structural validation {val_status_str}: {len(val_res.errors)} errors, {len(val_res.warnings)} warnings",
-                    )
-
-                    is_complete = assess_artifact_completeness(
-                        fmt=fmt,
-                        content=carved.recovered_bytes,
-                        detection_mode=detection_mode,
-                        validation_result=val_res,
-                    )
-                    eval_res = evaluate_artifact_confidence(validation_result=val_res, artifact=carved, is_complete=is_complete)
-                    emit_event(
-                        "CONFIDENCE_CALCULATED",
-                        f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
-                    )
-
-                    status_val = eval_res.status.value
-                    if (not is_complete) and status_val == "FULLY_RECOVERED":
-                        status_val = "PARTIALLY_RECOVERED"
-                    ver_bytes = eval_res.provenance.verified_bytes
-                    rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                    miss_bytes = eval_res.provenance.missing_bytes
-                    score_breakdown_dict = asdict(eval_res.score_breakdown)
-                    val_details_dict = asdict(val_res)
-                    prov_dict = asdict(eval_res.provenance)
-                    output_dict = {"recovered_bytes": carved.recovered_bytes.hex()}
-
-                frag0_updated = frag0.model_copy(
-                    update={
-                        "verified_bytes": ver_bytes,
-                        "reconstructed_bytes": rec_byte_cnt,
-                        "missing_bytes": miss_bytes,
-                        "validation_status": val_status_str,
-                    }
-                )
-                fragments[0] = frag0_updated
-            except Exception as e:
-                val_details_dict = {"error": str(e)}
-
-        # Scenario 2: Multiple candidates without end offset of same format (Bifragment recovery)
-        elif len(candidates) >= 2 and candidates[0].format == candidates[1].format:
-            cand2 = candidates[1]
-
-
-            raw_between = content[cand.offset:cand2.offset]
-            frag_a_bytes = raw_between.rstrip(b"\x00")
-            if not frag_a_bytes:
-                frag_a_bytes = raw_between
-
-            frag_a_end = cand.offset + len(frag_a_bytes)
-            frag_a_len = frag_a_end - cand.offset
-            gap_start = frag_a_end
-            gap_end = cand2.offset
-            gap_size = max(0, gap_end - gap_start)
-
-            frag_a = Fragment(
-                fragment_id="frag-0",
-                offset=cand.offset,
-                length=frag_a_len,
-                end_offset=frag_a_end,
-                status="PARTIAL",
-                source="bifragment_a",
-                format=fmt,
-                verified_bytes=frag_a_len,
-                reconstructed_bytes=0,
-                missing_bytes=0,
-                validation_status="PARTIAL",
-            )
-
-            frag_b_len = len(content) - cand2.offset
-            frag_b = Fragment(
-                fragment_id="frag-1",
-                offset=cand2.offset,
-                length=frag_b_len,
-                end_offset=len(content),
-                status="PARTIAL",
-                source="bifragment_b",
-                format=fmt,
-                verified_bytes=frag_b_len,
-                reconstructed_bytes=0,
-                missing_bytes=0,
-                validation_status="PARTIAL",
-            )
-
-            rel_ab = FragmentRelationship(
-                source_fragment_id="frag-0",
-                target_fragment_id="frag-1",
-                relationship_type="BOUNDED_GAP",
-                details={"gap_size": gap_size},
-            )
-            frag_a_rel = frag_a.model_copy(update={"relationships": [rel_ab]})
-            fragments.extend([frag_a_rel, frag_b])
-
-            emit_event(
-                "FRAGMENT_IDENTIFIED",
-                f"Identified bifragment frag-0 [{cand.offset}..{frag_a_end}] and frag-1 [{cand2.offset}..{len(content)}]",
-                relevant_fragment_ids=["frag-0", "frag-1"],
-            )
-
-            dam0 = DamageRegion(
-                region_id="damage-0",
-                start_offset=gap_start,
-                end_offset=gap_end,
-                length=gap_size,
-                type="MISSING",
-                status="RECONSTRUCTABLE",
-                affected_fragment_ids=["frag-0", "frag-1"],
-            )
-            damage_regions.append(dam0)
-            emit_event(
-                "DAMAGE_DETECTED",
-                f"Detected missing gap of {gap_size} bytes between offset {gap_start} and {gap_end}",
-                relevant_fragment_ids=["frag-0", "frag-1"],
-            )
-
-            emit_event(
-                "RECONSTRUCTION_STARTED",
-                f"Attempting bifragment gap reconstruction (gap size bounds: 1 to 4096)",
-                relevant_fragment_ids=["frag-0", "frag-1"],
-            )
-
-            try:
-                frag_b_bytes = content[cand2.offset:]
-                recon_res = reconstruct_bifragment(
-                    frag_a_bytes, frag_b_bytes, validator=validator, min_gap=1, max_gap=4096
-                )
-
-                rec_success = recon_res.success
-                emit_event(
-                    "RECONSTRUCTION_COMPLETED",
-                    f"Bifragment reconstruction {'succeeded' if rec_success else 'failed'}",
-                    relevant_fragment_ids=["frag-0", "frag-1"],
-                )
-
-                val_res_for_eval = recon_res.validation_result if (recon_res and recon_res.validation_result) else validator(frag_a_bytes + frag_b_bytes)
-                eval_res = evaluate_artifact_confidence(
-                    validation_result=val_res_for_eval,
-                    reconstruction_result=recon_res,
-                    actual_missing_bytes=gap_size,
-                )
-                emit_event(
-                    "CONFIDENCE_CALCULATED",
-                    f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
-                )
-
-                status_val = eval_res.status.value
-                ver_bytes = eval_res.provenance.verified_bytes
-                rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                miss_bytes = eval_res.provenance.missing_bytes
-
-                score_breakdown_dict = asdict(eval_res.score_breakdown)
-                val_details_dict = asdict(val_res_for_eval)
-                prov_dict = asdict(eval_res.provenance)
-                output_bytes = (recon_res.fragment_a_bytes + recon_res.fragment_b_bytes) if (recon_res and hasattr(recon_res, "fragment_a_bytes")) else (frag_a_bytes + frag_b_bytes)
-                output_dict = {"recovered_bytes": output_bytes.hex()}
-
-                step0 = ReconstructionStep(
-                    step_id="step-0",
-                    method="BIFRAGMENT_GAP",
-                    input_fragment_ids=["frag-0", "frag-1"],
-                    gap_start=gap_start,
-                    gap_end=gap_end,
-                    gap_size=gap_size,
-                    validated_gap_size=recon_res.gap_size if rec_success else None,
-                    result="SUCCESS" if rec_success else "FAILED",
-                    verified_bytes=ver_bytes,
-                    reconstructed_bytes=rec_byte_cnt,
-                    missing_bytes=miss_bytes,
-                    validation_status="PASSED" if (recon_res.validation_result and recon_res.validation_result.valid) else "FAILED",
-                    confidence=float(eval_res.score_breakdown.total),
-                )
-                reconstruction_steps.append(step0)
-
-                dam0_updated = dam0.model_copy(
-                    update={"status": "RECONSTRUCTED" if rec_success else "UNRECOVERABLE"}
-                )
-                damage_regions[0] = dam0_updated
-            except Exception as e:
-                val_details_dict = {"error": str(e)}
-
-        # Scenario 3: Single candidate without end offset (e.g. PDF xref damage or raw fragment)
-        else:
-            raw_frag_len = len(content) - cand.offset
-            frag0 = Fragment(
-                fragment_id="frag-0",
-                offset=cand.offset,
-                length=raw_frag_len,
-                end_offset=len(content),
-                status="PARTIAL",
-                source="magic_bytes" if cand.detection_method == "magic_bytes" else "synthetic_boundary",
-                format=fmt,
-                verified_bytes=raw_frag_len,
-                reconstructed_bytes=0,
-                missing_bytes=0,
-                validation_status="UNTESTED",
-            )
-            fragments.append(frag0)
-            emit_event(
-                "FRAGMENT_IDENTIFIED",
-                f"Identified candidate fragment frag-0 [{cand.offset}..{len(content)}] ({raw_frag_len} bytes)",
-                relevant_fragment_ids=["frag-0"],
-            )
-
-            # Check for TXT reconstruction
-            if fmt == "txt":
-                raw_bytes = content[cand.offset:]
-                emit_event("RECONSTRUCTION_STARTED", "Attempting deterministic TXT format reconstruction")
-                recon_res = reconstruct_artifact("txt", raw_bytes)
-                emit_event(
-                    "RECONSTRUCTION_COMPLETED",
-                    f"TXT reconstruction completed with status '{recon_res.status}'",
-                )
-                status_val = recon_res.status
-                ver_bytes = recon_res.verified_bytes
-                rec_byte_cnt = recon_res.reconstructed_bytes
-                miss_bytes = recon_res.missing_bytes
-                val_res = recon_res.validation_result or validator(raw_bytes)
-                val_status_str = "PASSED" if val_res.valid else "FAILED"
-                val_details_dict = asdict(val_res)
-                output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
-                score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
-
-                for idx_m, m in enumerate(recon_res.reconstruction_methods):
-                    step = ReconstructionStep(
-                        step_id=f"step-{idx_m}",
-                        method=m,
-                        input_fragment_ids=["frag-0"],
-                        gap_start=None,
-                        gap_end=None,
-                        gap_size=None,
-                        result="SUCCESS" if recon_res.success else "FAILED",
-                        verified_bytes=ver_bytes,
-                        reconstructed_bytes=rec_byte_cnt,
-                        missing_bytes=miss_bytes,
-                        validation_status=val_status_str,
-                        confidence=float(recon_res.details.get("confidence_score", 100.0)),
-                    )
-                    reconstruction_steps.append(step)
-
-                for idx_d, dmg in enumerate(recon_res.damage_regions):
-                    damage_regions.append(
-                        DamageRegion(
-                            region_id=f"damage-{idx_d}",
-                            start_offset=dmg.get("offset", 0),
-                            end_offset=dmg.get("offset", 0) + dmg.get("length", 0),
-                            length=dmg.get("length", 0),
-                            type=dmg.get("type", "CORRUPTED"),
-                            status="RECONSTRUCTED" if recon_res.success else "UNRECOVERABLE",
-                            affected_fragment_ids=["frag-0"],
-                        )
-                    )
-                    emit_event(
-                        "DAMAGE_DETECTED",
-                        f"Detected damage region ({dmg.get('type')}) of {dmg.get('length')} bytes at offset {dmg.get('offset')}",
-                        relevant_fragment_ids=["frag-0"],
-                    )
-
-            # Check for PDF xref reconstruction potential
-            elif fmt == "pdf":
-                raw_bytes = content[cand.offset:]
-                val_initial = validator(raw_bytes)
-
-                # Check for shuffled PDF fragments (trailer %%EOF placed before header %PDF-)
-                shuffled_recovered = False
-                if cand.offset > 0 and b"%%EOF" in content[:cand.offset]:
-                    candidate_unshuffled = content[cand.offset:] + content[:cand.offset]
-                    val_unshuffled = validator(candidate_unshuffled)
-                    if not val_unshuffled.valid and (b"xref" not in candidate_unshuffled or any("xref" in e.lower() for e in val_unshuffled.errors)):
-                        rebuilt_unshuffled, xref_ok = reconstruct_pdf_xref(candidate_unshuffled)
-                        if xref_ok:
-                            candidate_unshuffled = rebuilt_unshuffled
-                            val_unshuffled = validator(candidate_unshuffled)
-
-                    if val_unshuffled.valid:
-                        shuffled_recovered = True
-                        emit_event(
-                            "RECONSTRUCTION_STARTED",
-                            "Detected shuffled PDF fragments; executing deterministic un-shuffle reconstruction",
-                        )
-                        emit_event(
-                            "RECONSTRUCTION_COMPLETED",
-                            "Shuffled PDF fragments reordered and structurally validated",
-                        )
-                        header_frag_len = len(content) - cand.offset
-                        trailer_frag_len = cand.offset
-
-                        f_head = Fragment(
-                            fragment_id="frag-0",
-                            offset=cand.offset,
-                            length=header_frag_len,
-                            end_offset=len(content),
-                            status="VERIFIED",
-                            source="shuffled_header",
-                            format="pdf",
-                            verified_bytes=header_frag_len,
-                            reconstructed_bytes=0,
-                            missing_bytes=0,
-                            validation_status="PASSED",
-                        )
-                        f_tail = Fragment(
-                            fragment_id="frag-1",
-                            offset=0,
-                            length=trailer_frag_len,
-                            end_offset=cand.offset,
-                            status="VERIFIED",
-                            source="shuffled_trailer",
-                            format="pdf",
-                            verified_bytes=trailer_frag_len,
-                            reconstructed_bytes=0,
-                            missing_bytes=0,
-                            validation_status="PASSED",
-                        )
-                        rel = FragmentRelationship(
-                            source_fragment_id="frag-0",
-                            target_fragment_id="frag-1",
-                            relationship_type="SHUFFLED_SEQUENCE",
-                            details={"unshuffle_offset": cand.offset},
-                        )
-                        f_head = f_head.model_copy(update={"relationships": [rel]})
-                        fragments.clear()
-                        fragments.extend([f_head, f_tail])
-
-                        step0 = ReconstructionStep(
-                            step_id="step-0",
-                            method="FRAGMENT_UNSHUFFLE",
-                            input_fragment_ids=["frag-0", "frag-1"],
-                            gap_start=None,
-                            gap_end=None,
-                            gap_size=None,
-                            result="SUCCESS",
-                            verified_bytes=len(content),
-                            reconstructed_bytes=0,
-                            missing_bytes=0,
-                            validation_status="PASSED",
-                            confidence=100.0,
-                        )
-                        reconstruction_steps.append(step0)
-
-                        eval_res = evaluate_artifact_confidence(
-                            validation_result=val_unshuffled,
-                            artifact=candidate_unshuffled,
-                            actual_verified_bytes=len(content),
-                            actual_reconstructed_bytes=0,
-                            actual_missing_bytes=0,
-                        )
-                        status_val = eval_res.status.value
-                        ver_bytes = eval_res.provenance.verified_bytes
-                        rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                        miss_bytes = eval_res.provenance.missing_bytes
-                        total_input_bytes = len(content)
-                        score_breakdown_dict = asdict(eval_res.score_breakdown)
-                        val_details_dict = asdict(val_unshuffled)
-                        prov_dict = asdict(eval_res.provenance)
-                        prov_dict["evidence_size"] = len(content)
-                        prov_dict["reconstruction_method"] = "FRAGMENT_UNSHUFFLE"
-                        output_dict = {"recovered_bytes": candidate_unshuffled.hex()}
-
-                if not shuffled_recovered and (not val_initial.valid and b"xref" not in raw_bytes or any("xref" in e.lower() for e in val_initial.errors)):
-
-                    emit_event(
-                        "DAMAGE_DETECTED",
-                        "Detected damaged or missing PDF cross-reference table (xref)",
-                        relevant_fragment_ids=["frag-0"],
-                    )
-                    dam0 = DamageRegion(
-                        region_id="damage-0",
-                        start_offset=cand.offset,
-                        end_offset=len(content),
-                        length=raw_frag_len,
-                        type="CORRUPTED",
-                        status="RECONSTRUCTABLE",
-                        affected_fragment_ids=["frag-0"],
-                    )
-                    damage_regions.append(dam0)
-
-                    emit_event(
-                        "RECONSTRUCTION_STARTED",
-                        "Attempting deterministic PDF cross-reference (xref) reconstruction",
-                        relevant_fragment_ids=["frag-0"],
-                    )
-
-                    rebuilt_bytes, xref_ok = reconstruct_pdf_xref(raw_bytes)
-                    emit_event(
-                        "RECONSTRUCTION_COMPLETED",
-                        f"PDF xref reconstruction {'succeeded' if xref_ok else 'failed'}",
-                        relevant_fragment_ids=["frag-0"],
-                    )
-
-                    if xref_ok:
-                        carved_rebuilt = RecoveredArtifact(
-                            candidate_id="cand-0",
-                            format="pdf",
-                            mime_type="application/pdf",
-                            category="document",
-                            source_offset=cand.offset,
-                            recovered_bytes=rebuilt_bytes,
-                            recovered_byte_count=len(rebuilt_bytes),
-                            carving_method="XREF_RECONSTRUCTED",
-                        )
-                        val_res = validator(carved_rebuilt)
-                        # Accounted input is the surviving evidence actually uploaded
-                        # (raw_bytes). Bytes the deterministic xref rebuild added on top
-                        # of that evidence are reconstructed, never verified. Evidence
-                        # bytes not carried into the output are reported missing, so
-                        # verified + reconstructed + missing == total_input always.
-                        pdf_input_bytes = len(raw_bytes)
-                        pdf_reconstructed_bytes = max(0, len(rebuilt_bytes) - pdf_input_bytes)
-                        pdf_missing_bytes = max(0, pdf_input_bytes - len(rebuilt_bytes))
-                        pdf_verified_bytes = pdf_input_bytes - pdf_missing_bytes
-                        eval_res = evaluate_artifact_confidence(
-                            validation_result=val_res,
-                            artifact=carved_rebuilt,
-                            actual_verified_bytes=pdf_verified_bytes,
-                            actual_reconstructed_bytes=pdf_reconstructed_bytes,
-                            actual_missing_bytes=pdf_missing_bytes,
-                        )
-
-                        status_val = eval_res.status.value
-                        ver_bytes = eval_res.provenance.verified_bytes
-                        rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                        miss_bytes = eval_res.provenance.missing_bytes
-                        # total_input_bytes is the artifact budget (the convention
-                        # enforced by tests/test_fragment_pipeline.py), so it must
-                        # equal verified + reconstructed + missing. The uploaded
-                        # evidence size is preserved separately as evidence_size.
-                        total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
-                        score_breakdown_dict = asdict(eval_res.score_breakdown)
-                        val_details_dict = asdict(val_res)
-                        prov_dict = asdict(eval_res.provenance)
-                        prov_dict["evidence_size"] = len(content)
-                        output_dict = {"recovered_bytes": rebuilt_bytes.hex()}
-
-                        step0 = ReconstructionStep(
-                            step_id="step-0",
-                            method="XREF_RECONSTRUCTION",
-                            input_fragment_ids=["frag-0"],
-                            gap_start=None,
-                            gap_end=None,
-                            gap_size=None,
-                            result="SUCCESS",
-                            verified_bytes=ver_bytes,
-                            reconstructed_bytes=rec_byte_cnt,
-                            validation_status="PASSED" if val_res.valid else "FAILED",
-                            confidence=float(eval_res.score_breakdown.total),
-                        )
-                        reconstruction_steps.append(step0)
-                        damage_regions[0] = dam0.model_copy(update={"status": "RECONSTRUCTED"})
-                    else:
-                        val_res = val_initial
-                        eval_res = evaluate_artifact_confidence(val_res)
-                        status_val = eval_res.status.value
-                        ver_bytes = eval_res.provenance.verified_bytes
-                        rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                        miss_bytes = eval_res.provenance.missing_bytes
-                        score_breakdown_dict = asdict(eval_res.score_breakdown)
-                        val_details_dict = asdict(val_res)
-                        prov_dict = asdict(eval_res.provenance)
-                        output_dict = {"recovered_bytes": raw_bytes.hex()}
-
-            if not reconstruction_steps:
-                try:
-                    raw_frag = content[cand.offset:]
-                    emit_event("VALIDATION_STARTED", f"Validating format '{fmt}' on raw fragment")
-                    val_res = validator(raw_frag)
-                    val_status_str = "PASSED" if val_res.valid else "FAILED"
-                    emit_event("VALIDATION_COMPLETED", f"Validation {val_status_str}")
-
-                    eval_res = evaluate_artifact_confidence(val_res, artifact=raw_frag)
-                    emit_event(
-                        "CONFIDENCE_CALCULATED",
-                        f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
-                    )
-
-                    status_val = eval_res.status.value
-                    ver_bytes = eval_res.provenance.verified_bytes
-                    rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-                    miss_bytes = eval_res.provenance.missing_bytes
-                    score_breakdown_dict = asdict(eval_res.score_breakdown)
-                    val_details_dict = asdict(val_res)
-                    prov_dict = asdict(eval_res.provenance)
-                    output_dict = {"recovered_bytes": raw_frag.hex()}
-                except Exception as e:
-                    val_details_dict = {"error": str(e)}
-
-    # Scenario 3b: No signature candidates, but the evidence is TXT/CSV.
-    # Runs deterministic fragment detection, fragment relationship identification,
-    # and bounded-gap reconstruction. Operates on evidence bytes only.
-    elif (filename.rsplit(".", 1)[-1].lower() in ("txt", "csv")) or forced_text_fmt is not None:
+    # Scenario 3b: Text fragment detection for TXT/CSV evidence
+    if (filename.rsplit(".", 1)[-1].lower() in ("txt", "csv")) or forced_text_fmt is not None:
         target_fmt = forced_text_fmt or filename.rsplit(".", 1)[-1].lower()
 
         emit_event(
@@ -1115,7 +1353,7 @@ def execute_traced_recovery(
                     "byte_coverage": round(coverage, 6),
                 }
 
-    # Scenario 4: No candidate signatures found (direct format validation or unrecoverable)
+    # Scenario 4: Direct format validation or unrecoverable fallback
     else:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
         target_fmt = ext if ext in VALIDATORS else "bin"
@@ -1353,7 +1591,6 @@ def execute_traced_recovery(
                     )
                 )
         else:
-            # Test other format validators
             matched_fmt = None
             for test_fmt in ["json", "xml", "png", "jpeg", "csv", "txt"]:
                 val_test = validate_artifact(test_fmt, content)
@@ -1439,50 +1676,282 @@ def execute_traced_recovery(
                     f"Entire evidence buffer of {len(content)} bytes is severely corrupt/unrecoverable",
                 )
 
-    prov_dict["detection_mode"] = detection_mode
-
-    # Absolute final invariant guard:
-    # FULLY_RECOVERED is permitted ONLY when:
-    # R == 0, M == 0, structurally valid, and evidence is sufficient to establish a complete artifact.
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content
-    is_complete_final = assess_artifact_completeness(
-        fmt=fmt,
-        content=output_raw,
-        detection_mode=detection_mode,
-        missing_bytes=miss_bytes,
-        reconstructed_bytes=rec_byte_cnt,
-    )
-    if (rec_byte_cnt > 0 or miss_bytes > 0 or not is_complete_final) and status_val == "FULLY_RECOVERED":
-        status_val = "PARTIALLY_RECOVERED"
-
-    total_input_bytes = ver_bytes + rec_byte_cnt + miss_bytes
-
-    emit_event("RECOVERY_COMPLETED", f"Recovery run completed with status '{status_val}'")
-
-    completed_at = datetime.now(timezone.utc)
-
-    run = RecoveryRun(
+    return _finalize_recovery_run(
         run_id=run_id,
-        artifact_id=artifact_id,
-        filename=filename,
-        format=fmt,
-        status=status_val,
         started_at=started_at,
-        completed_at=completed_at,
-        total_input_bytes=total_input_bytes,
-        total_verified_bytes=ver_bytes,
-        total_reconstructed_bytes=rec_byte_cnt,
-        total_missing_bytes=miss_bytes,
+        events=events,
+        emit_event=emit_event,
+        filename=filename,
+        fmt=fmt,
+        candidate_id=None,
+        case_id=case_id,
+        artifact_id=artifact_id,
+        status_val=status_val,
+        ver_bytes=ver_bytes,
+        rec_byte_cnt=rec_byte_cnt,
+        miss_bytes=miss_bytes,
         fragments=fragments,
         damage_regions=damage_regions,
         reconstruction_steps=reconstruction_steps,
-        events=events,
-        validation=val_details_dict,
-        confidence=score_breakdown_dict,
-        provenance=prov_dict,
-        output=output_dict,
+        val_details_dict=val_details_dict,
+        score_breakdown_dict=score_breakdown_dict,
+        prov_dict=prov_dict,
+        output_dict=output_dict,
+        output_raw=output_raw,
         detection_mode=detection_mode,
     )
 
-    store.add_recovery_run(run)
-    return run
+
+def execute_traced_recoveries(
+    filename: str,
+    content: bytes,
+    case_id: Optional[str] = None,
+    detection_mode: Optional[str] = None,
+    candidates: Optional[List[Candidate]] = None,
+) -> List[RecoveryRun]:
+    """Execute canonical traced forensic recovery runs supporting multiple candidates.
+
+    - Scans evidence once if candidates are not explicitly provided.
+    - Deterministically orders candidates by (offset, header_length, candidate_id).
+    - Preserves complete candidate isolation: failure of one does not affect others.
+    - Preserves independent per-candidate V/R/M accounting.
+    - Enforces completeness and status invariants.
+    - Preserves bifragment ambiguity when evidence cannot discriminate.
+
+    Args:
+        filename: Name of the evidence file.
+        content: Raw evidence bytes.
+        case_id: Optional associated case identifier.
+        detection_mode: Optional detection mode ('known_file', 'blind', 'synthetic_harness').
+        candidates: Optional explicit list of Candidate objects to evaluate.
+
+    Returns:
+        List of stored RecoveryRun instances for all evaluated candidates.
+    """
+    if detection_mode is None:
+        if SYNTHETIC_START_MARKER in content:
+            detection_mode = "synthetic_harness"
+        else:
+            ext_check = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if ext_check in ("txt", "csv", "json", "xml", "png", "jpg", "jpeg", "pdf") and not any(
+                filename.lower().startswith(prefix) for prefix in ("carved_", "blind_", "dump", "unallocated", "raw_")
+            ):
+                detection_mode = "known_file"
+            else:
+                detection_mode = "blind"
+
+    # Resolve filename extension hint
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    ext_fmt_map = {
+        "txt": "txt",
+        "csv": "csv",
+        "json": "json",
+        "xml": "xml",
+        "png": "png",
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "pdf": "pdf",
+    }
+    ext_fmt = ext_fmt_map.get(ext)
+
+    forced_text_fmt: Optional[str] = None
+
+    if candidates is not None:
+        if len(candidates) == 0:
+            return []
+        candidates_to_process = list(candidates)
+    else:
+        candidates_to_process = scan_evidence(content)
+
+        # Filter out spurious candidates when unambiguous evidence signatures or hints exist
+        if b"%PDF-" in content or ext_fmt == "pdf":
+            pdf_cands = [c for c in candidates_to_process if c.format == "pdf"]
+            if pdf_cands:
+                candidates_to_process = pdf_cands
+        elif PNG_SIGNATURE in content or ext_fmt == "png":
+            png_cands = [c for c in candidates_to_process if c.format == "png"]
+            if png_cands:
+                candidates_to_process = png_cands
+        elif ext_fmt in ("txt", "csv", "json") and not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
+            matching_cands = [c for c in candidates_to_process if c.format == ext_fmt]
+            if matching_cands:
+                candidates_to_process = matching_cands
+            else:
+                candidates_to_process = []
+
+        if not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
+            if not (b"%PDF-" in content or PNG_SIGNATURE in content or content.startswith(b"\xff\xd8") or content.startswith(b"<?xml")):
+                probe_csv = detect_text_fragments(content, "csv")
+                probe_txt = detect_text_fragments(content, "txt")
+                if len(probe_csv) >= 2 and (ext_fmt == "csv" or not ext_fmt):
+                    candidates_to_process = []
+                    forced_text_fmt = "csv"
+                elif len(probe_txt) >= 2 and (ext_fmt == "txt" or not ext_fmt):
+                    candidates_to_process = []
+                    forced_text_fmt = "txt"
+
+    # Deterministic sorting: offset ascending, header length ascending, candidate_id ascending
+    candidates_to_process.sort(
+        key=lambda c: (
+            getattr(c, "offset", 0),
+            getattr(c, "detected_header_length", 0),
+            getattr(c, "candidate_id", ""),
+        )
+    )
+
+    if not candidates_to_process:
+        fallback_run = _recover_direct_fallback(
+            filename=filename,
+            content=content,
+            case_id=case_id,
+            artifact_id=None,
+            detection_mode=detection_mode,
+            forced_text_fmt=forced_text_fmt,
+        )
+        return [fallback_run]
+
+    runs: List[RecoveryRun] = []
+    idx = 0
+    while idx < len(candidates_to_process):
+        cand = candidates_to_process[idx]
+        try:
+            # Check for bifragment candidate pairing: consecutive candidates of same format without end offsets
+            if (
+                getattr(cand, "estimated_end_offset", None) is None
+                and idx + 1 < len(candidates_to_process)
+                and getattr(candidates_to_process[idx + 1], "estimated_end_offset", None) is None
+                and getattr(candidates_to_process[idx + 1], "format", "") == getattr(cand, "format", "")
+            ):
+                cand2 = candidates_to_process[idx + 1]
+                pair_run = _recover_bifragment_candidate_pair(
+                    filename=filename,
+                    content=content,
+                    cand=cand,
+                    cand2=cand2,
+                    case_id=case_id,
+                    detection_mode=detection_mode,
+                )
+                runs.append(pair_run)
+                idx += 2
+            elif getattr(cand, "estimated_end_offset", None) is not None:
+                contig_run = _recover_contiguous_candidate(
+                    filename=filename,
+                    content=content,
+                    cand=cand,
+                    case_id=case_id,
+                    detection_mode=detection_mode,
+                )
+                runs.append(contig_run)
+                idx += 1
+            else:
+                # Standalone candidate without estimated end offset (bound by next candidate or EOF)
+                next_offset = (
+                    getattr(candidates_to_process[idx + 1], "offset", None)
+                    if idx + 1 < len(candidates_to_process)
+                    else None
+                )
+                standalone_run = _recover_standalone_candidate(
+                    filename=filename,
+                    content=content,
+                    cand=cand,
+                    case_id=case_id,
+                    detection_mode=detection_mode,
+                    next_offset=next_offset,
+                )
+                runs.append(standalone_run)
+                idx += 1
+        except Exception as exc:
+            # True failure isolation: record error run and proceed to next candidate
+            err_run = _create_error_recovery_run(
+                filename=filename,
+                cand=cand,
+                error=exc,
+                case_id=case_id,
+                detection_mode=detection_mode or "known_file",
+            )
+            runs.append(err_run)
+            idx += 1
+
+    return runs
+
+
+# Canonical alias for compatibility
+execute_traced_multi_recovery = execute_traced_recoveries
+
+
+
+
+def execute_traced_recovery(
+    filename: str,
+    content: bytes,
+    case_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    detection_mode: Optional[str] = None,
+    candidates: Optional[List[Candidate]] = None,
+) -> RecoveryRun:
+    """Execute a single-candidate traced forensic recovery run over *content*.
+
+    Maintains full backward compatibility for existing callers. Delegates to
+    execute_traced_recoveries and returns the primary RecoveryRun selected using
+    the canonical candidate ranking (_rank_candidate).
+
+    Args:
+        filename: Name of the evidence file.
+        content: Raw evidence bytes.
+        case_id: Optional associated case identifier.
+        artifact_id: Optional associated artifact identifier.
+        detection_mode: Optional detection mode ('known_file', 'blind', 'synthetic_harness').
+        candidates: Optional explicit list of Candidate objects to evaluate.
+
+    Returns:
+        Stored RecoveryRun instance containing the real forensic trace.
+    """
+    runs = execute_traced_recoveries(
+        filename=filename,
+        content=content,
+        case_id=case_id,
+        detection_mode=detection_mode,
+        candidates=candidates,
+    )
+    if runs:
+        if len(runs) == 1:
+            primary_run = runs[0]
+        else:
+            # Resolve extension hint for candidate ranking
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            ext_fmt_map = {
+                "txt": "txt",
+                "csv": "csv",
+                "json": "json",
+                "xml": "xml",
+                "png": "png",
+                "jpg": "jpeg",
+                "jpeg": "jpeg",
+                "pdf": "pdf",
+            }
+            ext_fmt = ext_fmt_map.get(ext)
+
+            cands_to_rank = list(candidates) if candidates is not None else scan_evidence(content)
+            if cands_to_rank:
+                cands_to_rank.sort(key=lambda c: _rank_candidate(c, ext_fmt), reverse=True)
+                top_cand_id = getattr(cands_to_rank[0], "candidate_id", None)
+                matched_run = next((r for r in runs if r.candidate_id == top_cand_id), None)
+                primary_run = matched_run or runs[0]
+            else:
+                primary_run = runs[0]
+
+        if artifact_id is not None:
+            primary_run = primary_run.model_copy(update={"artifact_id": artifact_id})
+            store.add_recovery_run(primary_run)
+        return primary_run
+
+    # Defensive fallback when no runs produced
+    fallback_run = _recover_direct_fallback(
+        filename=filename,
+        content=content,
+        case_id=case_id,
+        artifact_id=artifact_id,
+        detection_mode=detection_mode or "blind",
+    )
+    return fallback_run
