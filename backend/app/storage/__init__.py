@@ -10,6 +10,8 @@ from backend.app.storage.contracts import (
 )
 from backend.app.storage.blob_store import InMemoryBlobStore
 from backend.app.storage.memory_store import InMemoryStore, MAX_EVIDENCE_SIZE
+from backend.app.storage.sqlite_engine import SqliteEngine
+from backend.app.storage.sqlite_blob_store import SqliteBlobStore
 
 __all__ = [
     "BlobStore",
@@ -19,4 +21,6 @@ __all__ = [
     "InMemoryBlobStore",
     "InMemoryStore",
     "MAX_EVIDENCE_SIZE",
+    "SqliteEngine",
+    "SqliteBlobStore",
 ]
