@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from backend.app.recovery.signatures import (
     SYNTHETIC_START_MARKER,
@@ -188,6 +188,9 @@ def scan_evidence(data: bytes) -> List[Candidate]:
 
     # ── Pass 5: scan for direct XML headers ─────────────────────
     _scan_xml(data, evidence_len, candidates)
+
+    # ── Pass 6: scan for blind JSON container documents ─────────
+    _scan_json(data, evidence_len, candidates)
 
     # Deduplicate candidates sharing exact same offset and format
     seen = set()
@@ -393,12 +396,203 @@ def _scan_pdf(
         search_from = pos + sig_len
 
 
+def _find_xml_closing_boundary(
+    data: bytes,
+    header_pos: int,
+    max_window: int = 4 * 1024 * 1024,
+) -> Optional[int]:
+    """Find the exact closing boundary of the XML root element starting at *header_pos*.
+
+    Handles:
+      - XML declaration (<?xml ... ?>)
+      - doctype declarations (<!DOCTYPE ... >)
+      - comments (<!-- ... -->)
+      - processing instructions (<? ... ?>)
+      - self-closing root tag (<root ... />)
+      - CDATA sections with fake closing tags (<![CDATA[ </root> ]]>)
+      - comments with fake closing tags (<!-- </root> -->)
+      - attribute quotes containing '>' or fake closing tags
+
+    Returns:
+        Byte offset one past the last byte of the root element (e.g. after '</root>'),
+        or None if truncated or not found within max_window.
+    """
+    n = min(len(data), header_pos + max_window)
+    next_xml = data.find(XML_HEADER_SIGNATURE, header_pos + len(XML_HEADER_SIGNATURE))
+    if next_xml != -1 and next_xml < n:
+        n = next_xml
+
+    decl_end = data.find(b"?>", header_pos)
+    if decl_end == -1 or decl_end > header_pos + 1024 or decl_end >= n:
+        return None
+    i = decl_end + 2
+
+    root_tag = None
+    while i < n:
+        while i < n and data[i] in b" \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        if data.startswith(b"<!--", i):
+            c_end = data.find(b"-->", i + 4)
+            if c_end == -1:
+                return None
+            i = c_end + 3
+            continue
+        if data.startswith(b"<?", i):
+            pi_end = data.find(b"?>", i + 2)
+            if pi_end == -1:
+                return None
+            i = pi_end + 2
+            continue
+        if data.startswith(b"<!DOCTYPE", i) or data.startswith(b"<!doctype", i):
+            j = i + 9
+            has_bracket = False
+            while j < n:
+                if data[j : j + 1] == b"[":
+                    has_bracket = True
+                elif data[j : j + 1] == b"]":
+                    has_bracket = False
+                elif data[j : j + 1] == b">" and not has_bracket:
+                    i = j + 1
+                    break
+                j += 1
+            else:
+                return None
+            continue
+        if data[i : i + 1] == b"<":
+            tag_start = i + 1
+            if tag_start < n and (data[tag_start : tag_start + 1].isalpha() or data[tag_start : tag_start + 1] in b"_:"):
+                j = tag_start
+                while j < n and (data[j : j + 1].isalnum() or data[j : j + 1] in b"_.:-"):
+                    j += 1
+                root_tag = data[tag_start:j]
+                i = j
+                break
+            else:
+                return None
+        else:
+            i += 1
+
+    if not root_tag:
+        return None
+
+    in_quote = None
+    while i < n:
+        b = data[i : i + 1]
+        if in_quote:
+            if b == in_quote:
+                in_quote = None
+            i += 1
+            continue
+        if b in (b'"', b"'"):
+            in_quote = b
+            i += 1
+            continue
+        if b == b"/":
+            if i + 1 < n and data[i + 1 : i + 2] == b">":
+                return i + 2
+        if b == b">":
+            i += 1
+            break
+        i += 1
+    else:
+        return None
+
+    in_quote = None
+    in_tag = False
+    closing_target = b"</" + root_tag
+    opening_target = b"<" + root_tag
+    root_depth = 1
+
+    while i < n:
+        if not in_tag:
+            if data.startswith(b"<!--", i):
+                c_end = data.find(b"-->", i + 4)
+                if c_end == -1:
+                    return None
+                i = c_end + 3
+                continue
+            if data.startswith(b"<![CDATA[", i):
+                cd_end = data.find(b"]]>", i + 9)
+                if cd_end == -1:
+                    return None
+                i = cd_end + 3
+                continue
+            if data.startswith(closing_target, i):
+                j = i + len(closing_target)
+                while j < n and data[j : j + 1] in b" \t\r\n":
+                    j += 1
+                if j < n and data[j : j + 1] == b">":
+                    root_depth -= 1
+                    if root_depth == 0:
+                        return j + 1
+                    i = j + 1
+                    continue
+            if data.startswith(opening_target, i):
+                next_b = data[i + len(opening_target) : i + len(opening_target) + 1]
+                if next_b in b" \t\r\n/>":
+                    k = i + len(opening_target)
+                    tag_quote = None
+                    is_self_closing = False
+                    while k < n:
+                        tb = data[k : k + 1]
+                        if tag_quote:
+                            if tb == tag_quote:
+                                tag_quote = None
+                            k += 1
+                            continue
+                        if tb in (b'"', b"'"):
+                            tag_quote = tb
+                            k += 1
+                            continue
+                        if tb == b"/":
+                            if k + 1 < n and data[k + 1 : k + 2] == b">":
+                                is_self_closing = True
+                                k += 2
+                                break
+                        if tb == b">":
+                            k += 1
+                            break
+                        k += 1
+                    else:
+                        return None
+
+                    if not is_self_closing:
+                        root_depth += 1
+                    i = k
+                    continue
+            if data[i : i + 1] == b"<":
+                in_tag = True
+                i += 1
+                continue
+            i += 1
+        else:
+            b = data[i : i + 1]
+            if in_quote:
+                if b == in_quote:
+                    in_quote = None
+                i += 1
+                continue
+            if b in (b'"', b"'"):
+                in_quote = b
+                i += 1
+                continue
+            if b == b">":
+                in_tag = False
+                i += 1
+                continue
+            i += 1
+
+    return None
+
+
 def _scan_xml(
     data: bytes,
     evidence_len: int,
     candidates: List[Candidate],
 ) -> None:
-    """Find direct XML header signatures in *data*."""
+    """Find direct XML header signatures in *data* with bounded end estimation."""
     sig = XML_HEADER_SIGNATURE
     sig_len = len(sig)
 
@@ -409,6 +603,8 @@ def _scan_xml(
         if pos == -1:
             break
 
+        estimated_end = _find_xml_closing_boundary(data, pos)
+
         candidates.append(
             Candidate(
                 candidate_id="",
@@ -417,9 +613,345 @@ def _scan_xml(
                 category="structured",
                 offset=pos,
                 detected_header_length=sig_len,
-                estimated_end_offset=None,
+                estimated_end_offset=estimated_end,
                 detection_method="magic_bytes",
             )
         )
-
         search_from = pos + sig_len
+
+
+_JSON_WS = " \t\n\r"
+_JSON_LITERALS = ("true", "false", "null")
+
+
+def _skip_ws(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _JSON_WS:
+        i += 1
+    return i
+
+
+def _scan_string(text: str, i: int) -> Tuple[int, str]:
+    """Scan a JSON string starting at the opening quote.
+
+    Returns (index_after_string, status) where status is "ok" or "unterminated".
+    """
+    n = len(text)
+    j = i + 1
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            if j + 1 >= n:
+                return n, "unterminated"
+            j += 2
+            continue
+        if c == '"':
+            return j + 1, "ok"
+        j += 1
+    return n, "unterminated"
+
+
+def _scan_number(text: str, i: int) -> Tuple[int, str]:
+    """Scan a JSON number literal.
+
+    Returns (index_after_number, status) where status is "ok" or "invalid".
+    """
+    n = len(text)
+    j = i
+    if j < n and text[j] == "-":
+        j += 1
+    digits_start = j
+    while j < n and text[j].isdigit():
+        j += 1
+    if j == digits_start:
+        return j, "invalid"
+    if j < n and text[j] == ".":
+        j += 1
+        frac_start = j
+        while j < n and text[j].isdigit():
+            j += 1
+        if j == frac_start:
+            return j, "invalid"
+    if j < n and text[j] in "eE":
+        j += 1
+        if j < n and text[j] in "+-":
+            j += 1
+        exp_start = j
+        while j < n and text[j].isdigit():
+            j += 1
+        if j == exp_start:
+            return j, "invalid"
+    if j < n and text[j] not in _JSON_WS and text[j] not in ",}]":
+        return j, "invalid"
+    return j, "ok"
+
+
+def _scan_literal(text: str, i: int) -> Tuple[int, str]:
+    """Scan true/false/null.
+
+    Returns (index_after_literal, status) where status is "ok", "incomplete", or "invalid".
+    """
+    n = len(text)
+    for lit in _JSON_LITERALS:
+        if text.startswith(lit, i):
+            end = i + len(lit)
+            if end < n and (text[end].isalnum() or text[end] == "_"):
+                return end, "invalid"
+            return end, "ok"
+        if lit.startswith(text[i:n]):
+            return n, "incomplete"
+    return i, "invalid"
+
+
+def _find_json_container_extent(
+    text: str,
+    max_depth: int = 128,
+) -> Tuple[Optional[int], bool, bool]:
+    """Scan *text* starting at index 0 for a JSON object or array container.
+
+    Returns:
+        (end_char_index, is_complete, is_plausible_truncated)
+        - If complete: (end_index, True, False)
+        - If truncated but structurally plausible: (None, False, True)
+        - If invalid/noise: (None, False, False)
+    """
+    i = _skip_ws(text, 0)
+    if i >= len(text) or text[i] not in ("{", "["):
+        return None, False, False
+    opener = text[i]
+    stack = [opener]
+    i += 1
+    state = "key" if opener == "{" else "value"
+    has_content = False
+
+    while i < len(text) and len(stack) <= max_depth:
+        if state == "value":
+            i = _skip_ws(text, i)
+            if i >= len(text):
+                return None, False, has_content
+            c = text[i]
+            if c == "{":
+                stack.append("{")
+                i += 1
+                state = "key"
+                has_content = True
+                continue
+            if c == "[":
+                stack.append("[")
+                i += 1
+                state = "value"
+                has_content = True
+                continue
+            if c == "]" and stack[-1] == "[":
+                i += 1
+                stack.pop()
+                if not stack:
+                    return i, True, False
+                state = "sep"
+                continue
+            if c == '"':
+                i, st = _scan_string(text, i)
+                if st != "ok":
+                    return None, False, has_content
+                has_content = True
+                state = "sep"
+                continue
+            if c in "tfn":
+                i, st = _scan_literal(text, i)
+                if st == "incomplete":
+                    return None, False, has_content
+                if st != "ok":
+                    return None, False, False
+                has_content = True
+                state = "sep"
+                continue
+            if c == "-" or c.isdigit():
+                i, st = _scan_number(text, i)
+                if st == "incomplete":
+                    return None, False, has_content
+                if st != "ok":
+                    return None, False, False
+                has_content = True
+                state = "sep"
+                continue
+            return None, False, False
+
+        if state == "key":
+            i = _skip_ws(text, i)
+            if i >= len(text):
+                return None, False, has_content
+            if text[i] == "}" and stack[-1] == "{":
+                i += 1
+                stack.pop()
+                if not stack:
+                    return i, True, False
+                state = "sep"
+                continue
+            if text[i] != '"':
+                return None, False, False
+            i, st = _scan_string(text, i)
+            if st != "ok":
+                return None, False, has_content
+            has_content = True
+            state = "colon"
+            continue
+
+        if state == "colon":
+            i = _skip_ws(text, i)
+            if i >= len(text):
+                return None, False, has_content
+            if text[i] != ":":
+                return None, False, False
+            i += 1
+            state = "value"
+            continue
+
+        if state == "sep":
+            if not stack:
+                return i, True, False
+            i = _skip_ws(text, i)
+            if i >= len(text):
+                return None, False, has_content
+            c = text[i]
+            closer = "}" if stack[-1] == "{" else "]"
+            if c == ",":
+                i += 1
+                state = "key" if stack[-1] == "{" else "value"
+                continue
+            if c == closer:
+                i += 1
+                stack.pop()
+                if not stack:
+                    return i, True, False
+                state = "sep"
+                continue
+            return None, False, False
+
+    return None, False, has_content
+
+
+def _scan_json(
+    data: bytes,
+    evidence_len: int,
+    candidates: List[Candidate],
+) -> None:
+    """Find all blind JSON container documents (objects and arrays) in *data*."""
+    MAX_JSON_WINDOW = 2 * 1024 * 1024  # 2 MiB bounded search window
+    MAX_NESTING_DEPTH = 128
+    search_from = 0
+
+    while search_from < evidence_len:
+        pos_brace = data.find(b"{", search_from)
+        pos_bracket = data.find(b"[", search_from)
+
+        if pos_brace == -1 and pos_bracket == -1:
+            break
+        if pos_brace != -1 and pos_bracket != -1:
+            pos = min(pos_brace, pos_bracket)
+        else:
+            pos = pos_brace if pos_brace != -1 else pos_bracket
+
+        # Avoid redundant duplicate detection if pos is inside an already detected synthetic candidate
+        in_synthetic = False
+        for c in candidates:
+            if c.detection_method == "synthetic_boundary":
+                c_end = c.estimated_end_offset if c.estimated_end_offset is not None else evidence_len
+                if c.offset <= pos < c_end:
+                    in_synthetic = True
+                    search_from = c_end
+                    break
+        if in_synthetic:
+            continue
+
+        opener = data[pos : pos + 1]
+
+        # Fast lookahead: inspect first non-whitespace byte
+        k = pos + 1
+        while k < evidence_len and data[k] in b" \t\r\n":
+            k += 1
+
+        if k >= evidence_len:
+            search_from = pos + 1
+            continue
+
+        next_b = data[k : k + 1]
+        if opener == b"{":
+            if next_b not in (b'"', b"}"):
+                search_from = pos + 1
+                continue
+        elif opener == b"[":
+            if not (next_b in (b'"', b"{", b"[", b"]", b"-", b"t", b"f", b"n") or (b"0" <= next_b <= b"9")):
+                search_from = pos + 1
+                continue
+
+        window_len = min(evidence_len - pos, MAX_JSON_WINDOW)
+        slice_bytes = data[pos : pos + window_len]
+        text = slice_bytes.decode("utf-8", errors="replace")
+
+        end_char_index, is_complete, is_plausible_truncated = _find_json_container_extent(
+            text, max_depth=MAX_NESTING_DEPTH
+        )
+
+        if is_complete and end_char_index is not None:
+            doc_bytes = text[:end_char_index].encode("utf-8")
+            byte_len = len(doc_bytes)
+            estimated_end = pos + byte_len
+
+            # Verify UTF-8 fidelity and validate JSON structure
+            try:
+                candidate_raw = data[pos:estimated_end]
+                candidate_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                search_from = pos + 1
+                continue
+
+            from backend.app.recovery.validators.json import validate_json
+
+            val_res = validate_json(candidate_raw)
+            if val_res.valid:
+                candidates.append(
+                    Candidate(
+                        candidate_id="",
+                        format="json",
+                        mime_type="application/json",
+                        category="structured",
+                        offset=pos,
+                        detected_header_length=1,
+                        estimated_end_offset=estimated_end,
+                        detection_method="syntax_boundary",
+                    )
+                )
+                search_from = estimated_end
+                continue
+            else:
+                search_from = pos + 1
+                continue
+
+        elif not is_complete and is_plausible_truncated:
+            from backend.app.recovery.reconstructors.json import (
+                _classify_prefix,
+                _CLOSABLE,
+                _INCOMPLETE,
+            )
+
+            cls_res, stack, _ = _classify_prefix(text)
+            if cls_res in (_CLOSABLE, _INCOMPLETE) and len(stack) > 0:
+                candidates.append(
+                    Candidate(
+                        candidate_id="",
+                        format="json",
+                        mime_type="application/json",
+                        category="structured",
+                        offset=pos,
+                        detected_header_length=1,
+                        estimated_end_offset=None,
+                        detection_method="syntax_boundary",
+                    )
+                )
+                search_from = pos + len(slice_bytes)
+                continue
+            else:
+                search_from = pos + 1
+                continue
+        else:
+            search_from = pos + 1
+            continue

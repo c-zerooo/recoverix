@@ -221,6 +221,7 @@ def _recover_contiguous_candidate(
     started_at, events, emit_event = _init_trace_context(run_id)
 
     emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
+    emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
     emit_event(
         "FORMAT_DETECTED",
         f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
@@ -271,7 +272,7 @@ def _recover_contiguous_candidate(
     try:
         carved: RecoveredArtifact = carve_candidate(content, cand)
         carved_bytes = carved.recovered_bytes
-        if fmt in ("txt", "csv"):
+        if fmt in ("txt", "csv", "json"):
             emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
             recon_res = reconstruct_artifact(fmt, carved, detection_mode=detection_mode)
             emit_event(
@@ -282,11 +283,32 @@ def _recover_contiguous_candidate(
             ver_bytes = recon_res.verified_bytes
             rec_byte_cnt = recon_res.reconstructed_bytes
             miss_bytes = recon_res.missing_bytes
+            emit_event("VALIDATION_STARTED", f"Validating structural integrity for format '{fmt}'")
             val_res = recon_res.validation_result or validator(carved)
             val_status_str = "PASSED" if val_res.valid else "FAILED"
+            emit_event(
+                "VALIDATION_COMPLETED",
+                f"Structural validation {val_status_str}: {len(val_res.errors)} errors, {len(val_res.warnings)} warnings",
+            )
             val_details_dict = asdict(val_res)
             output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
-            score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+            eval_res = evaluate_artifact_confidence(
+                validation_result=val_res,
+                artifact=recon_res.recovered_bytes,
+                actual_verified_bytes=ver_bytes,
+                actual_reconstructed_bytes=rec_byte_cnt,
+                actual_missing_bytes=miss_bytes,
+            )
+            emit_event(
+                "CONFIDENCE_CALCULATED",
+                f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
+            )
+            score_breakdown_dict = asdict(eval_res.score_breakdown)
+            prov_dict = asdict(eval_res.provenance)
+            prov_dict["evidence_size"] = len(content)
+            if "reconstruction_method" in (recon_res.details or {}):
+                prov_dict["reconstruction_method"] = recon_res.details["reconstruction_method"]
 
             is_complete = assess_artifact_completeness(
                 fmt=fmt,
@@ -637,6 +659,7 @@ def _recover_standalone_candidate(
     started_at, events, emit_event = _init_trace_context(run_id)
 
     emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
+    emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
     emit_event(
         "FORMAT_DETECTED",
         f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
@@ -686,13 +709,13 @@ def _recover_standalone_candidate(
         relevant_fragment_ids=["frag-0"],
     )
 
-    if fmt == "txt":
+    if fmt in ("txt", "json"):
         raw_bytes = content[cand.offset:bound_end]
-        emit_event("RECONSTRUCTION_STARTED", "Attempting deterministic TXT format reconstruction")
-        recon_res = reconstruct_artifact("txt", raw_bytes)
+        emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
+        recon_res = reconstruct_artifact(fmt, raw_bytes)
         emit_event(
             "RECONSTRUCTION_COMPLETED",
-            f"TXT reconstruction completed with status '{recon_res.status}'",
+            f"{fmt.upper()} reconstruction completed with status '{recon_res.status}'",
         )
         status_val = recon_res.status
         ver_bytes = recon_res.verified_bytes
@@ -702,7 +725,19 @@ def _recover_standalone_candidate(
         val_status_str = "PASSED" if val_res.valid else "FAILED"
         val_details_dict = asdict(val_res)
         output_dict = {"recovered_bytes": recon_res.recovered_bytes.hex()}
-        score_breakdown_dict = {"total": recon_res.details.get("confidence_score", 100.0)}
+
+        eval_res = evaluate_artifact_confidence(
+            validation_result=val_res,
+            artifact=recon_res.recovered_bytes,
+            actual_verified_bytes=ver_bytes,
+            actual_reconstructed_bytes=rec_byte_cnt,
+            actual_missing_bytes=miss_bytes,
+        )
+        score_breakdown_dict = asdict(eval_res.score_breakdown)
+        prov_dict = asdict(eval_res.provenance)
+        prov_dict["evidence_size"] = len(content)
+        if "reconstruction_method" in (recon_res.details or {}):
+            prov_dict["reconstruction_method"] = recon_res.details["reconstruction_method"]
 
         for idx_m, m in enumerate(recon_res.reconstruction_methods):
             step = ReconstructionStep(
