@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from backend.app.recovery.signatures import (
     SYNTHETIC_START_MARKER,
@@ -55,6 +55,15 @@ from backend.app.recovery.signatures import (
     PDF_TRAILER_SIGNATURE,
     XML_HEADER_SIGNATURE,
 )
+
+
+@dataclass(frozen=True)
+class CandidateRelationship:
+    """Directional spatial relationship between two candidates."""
+
+    target_candidate_id: str
+    target_format: str
+    relationship_type: str  # "COEXTENSIVE", "CONTAINS", "CONTAINED_BY", "OVERLAPS"
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,7 @@ class Candidate:
         estimated_end_offset: Byte offset one past the last byte of the
             candidate region, or ``None`` if the end could not be determined.
         detection_method: Label describing how this candidate was found.
+        relationships: Directional spatial relationships with other candidates.
     """
 
     candidate_id: str
@@ -81,6 +91,17 @@ class Candidate:
     detected_header_length: int
     estimated_end_offset: Optional[int]
     detection_method: str
+    relationships: tuple[CandidateRelationship, ...] = ()
+
+    @property
+    def evidence_start(self) -> int:
+        """Physical start byte offset in the original evidence buffer."""
+        return self.offset
+
+    @property
+    def evidence_end(self) -> Optional[int]:
+        """Physical end byte offset in the original evidence buffer."""
+        return self.estimated_end_offset
 
 
 # ── Content heuristic for Synthetic Marker Payloads ──────────────────
@@ -158,6 +179,156 @@ def _classify_synthetic_content(body: bytes) -> tuple[str, str, str]:
 
 # ── Scanner ─────────────────────────────────────────────────────────
 
+_METHOD_PRIORITY = {
+    "synthetic_boundary": 5,
+    "magic_bytes": 4,
+    "direct_header": 3,
+    "heuristic_json_container": 2,
+    "heuristic_text_run": 1,
+}
+
+MAX_CANDIDATES = 250
+
+_last_scan_metadata: dict[str, Any] = {
+    "total_discovered_candidates": 0,
+    "candidate_cap_enforced": False,
+    "candidates_omitted": 0,
+}
+
+
+def get_last_scan_metadata() -> dict[str, Any]:
+    """Return metadata from the most recent scan_evidence() execution."""
+    return dict(_last_scan_metadata)
+
+
+def _dedup_candidates(candidates: List[Candidate]) -> List[Candidate]:
+    """Deduplicate candidates sharing exact same (offset, format).
+
+    If duplicate (offset, format) pairs exist, deterministically select the one with:
+      1. Known estimated_end_offset preferred over unknown.
+      2. Larger known physical span (estimated_end_offset - offset).
+      3. Larger detected_header_length.
+      4. Higher detection_method priority.
+      5. First-discovered insertion order tie-breaker.
+    """
+    groups: dict[tuple[int, str], list[tuple[int, Candidate]]] = {}
+    for idx, c in enumerate(candidates):
+        key = (c.offset, c.format)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append((idx, c))
+
+    unique: List[Candidate] = []
+    for key, items in groups.items():
+        if len(items) == 1:
+            unique.append(items[0][1])
+        else:
+            def _score_candidate(item: tuple[int, Candidate]) -> tuple[int, int, int, int, int]:
+                idx, c = item
+                has_end = 1 if c.estimated_end_offset is not None else 0
+                span = (c.estimated_end_offset - c.offset) if c.estimated_end_offset is not None else 0
+                hdr_len = c.detected_header_length
+                method_pri = _METHOD_PRIORITY.get(c.detection_method, 0)
+                return (has_end, span, hdr_len, method_pri, -idx)
+
+            best_item = max(items, key=_score_candidate)
+            unique.append(best_item[1])
+
+    return unique
+
+
+def _compute_candidate_relationships(candidates: List[Candidate]) -> List[Candidate]:
+    """Compute spatial relationships between candidates when physical boundaries prove them.
+
+    Both ends MUST be known (estimated_end_offset is not None) for:
+      - COEXTENSIVE
+      - CONTAINS
+      - CONTAINED_BY
+      - OVERLAPS
+
+    If either candidate has an unknown end (estimated_end_offset is None),
+    no relationship is asserted. Unknown is never replaced with len(data).
+    """
+    n = len(candidates)
+    if n <= 1:
+        return candidates
+
+    rel_map: dict[str, list[CandidateRelationship]] = {c.candidate_id: [] for c in candidates}
+
+    for i in range(n):
+        c_a = candidates[i]
+        for j in range(i + 1, n):
+            c_b = candidates[j]
+
+            # Both ends MUST be known to prove any spatial relationship
+            if c_a.estimated_end_offset is None or c_b.estimated_end_offset is None:
+                continue
+
+            a_start, a_end = c_a.offset, c_a.estimated_end_offset
+            b_start, b_end = c_b.offset, c_b.estimated_end_offset
+
+            # Provably disjoint
+            if a_end <= b_start or b_end <= a_start:
+                continue
+
+            # COEXTENSIVE: same start and same end
+            if a_start == b_start and a_end == b_end:
+                rel_map[c_a.candidate_id].append(
+                    CandidateRelationship(c_b.candidate_id, c_b.format, "COEXTENSIVE")
+                )
+                rel_map[c_b.candidate_id].append(
+                    CandidateRelationship(c_a.candidate_id, c_a.format, "COEXTENSIVE")
+                )
+                continue
+
+            # CONTAINS / CONTAINED_BY: A.start <= B.start and B.end <= A.end with at least one strict inequality
+            if a_start <= b_start and b_end <= a_end and (a_start < b_start or b_end < a_end):
+                rel_map[c_a.candidate_id].append(
+                    CandidateRelationship(c_b.candidate_id, c_b.format, "CONTAINS")
+                )
+                rel_map[c_b.candidate_id].append(
+                    CandidateRelationship(c_a.candidate_id, c_a.format, "CONTAINED_BY")
+                )
+                continue
+
+            if b_start <= a_start and a_end <= b_end and (b_start < a_start or a_end < b_end):
+                rel_map[c_b.candidate_id].append(
+                    CandidateRelationship(c_a.candidate_id, c_a.format, "CONTAINS")
+                )
+                rel_map[c_a.candidate_id].append(
+                    CandidateRelationship(c_b.candidate_id, c_b.format, "CONTAINED_BY")
+                )
+                continue
+
+            # OVERLAPS: ranges partially overlap without containment/coextensiveness
+            if (a_start < b_start < a_end < b_end) or (b_start < a_start < b_end < a_end):
+                rel_map[c_a.candidate_id].append(
+                    CandidateRelationship(c_b.candidate_id, c_b.format, "OVERLAPS")
+                )
+                rel_map[c_b.candidate_id].append(
+                    CandidateRelationship(c_a.candidate_id, c_a.format, "OVERLAPS")
+                )
+
+    result: List[Candidate] = []
+    for c in candidates:
+        rels = rel_map[c.candidate_id]
+        rels.sort(key=lambda r: (r.target_candidate_id, r.relationship_type))
+        result.append(
+            Candidate(
+                candidate_id=c.candidate_id,
+                format=c.format,
+                mime_type=c.mime_type,
+                category=c.category,
+                offset=c.offset,
+                detected_header_length=c.detected_header_length,
+                estimated_end_offset=c.estimated_end_offset,
+                detection_method=c.detection_method,
+                relationships=tuple(rels),
+            )
+        )
+    return result
+
+
 def scan_evidence(data: bytes) -> List[Candidate]:
     """Scan *data* for registered format signatures across 7 formats.
 
@@ -165,9 +336,16 @@ def scan_evidence(data: bytes) -> List[Candidate]:
         data: Raw evidence bytes.  Never mutated.
 
     Returns:
-        An ordered list of Candidate objects, sorted by offset.
+        An ordered list of Candidate objects, sorted deterministically by offset.
         Empty list if *data* is empty or contains no matches.
     """
+    global _last_scan_metadata
+    _last_scan_metadata = {
+        "total_discovered_candidates": 0,
+        "candidate_cap_enforced": False,
+        "candidates_omitted": 0,
+    }
+
     if len(data) == 0:
         return []
 
@@ -195,22 +373,41 @@ def scan_evidence(data: bytes) -> List[Candidate]:
     # ── Pass 7: scan for blind TXT and CSV candidates ───────────
     _scan_text_and_csv(data, evidence_len, candidates)
 
-    # Deduplicate candidates sharing exact same offset and format
-    seen = set()
-    unique_candidates = []
-    for c in candidates:
-        key = (c.offset, c.format)
-        if key not in seen:
-            seen.add(key)
-            unique_candidates.append(c)
+    # 1. Exact deduplication: (offset, format)
+    unique_candidates = _dedup_candidates(candidates)
 
-    # Sort by offset for deterministic ordering, then by format
-    unique_candidates.sort(key=lambda c: (c.offset, c.format))
+    # 2. Deterministic sorting
+    unique_candidates.sort(
+        key=lambda c: (
+            c.offset,
+            0 if c.estimated_end_offset is not None else 1,
+            -(c.estimated_end_offset or 0),
+            -c.detected_header_length,
+            c.format,
+            c.detection_method,
+        )
+    )
 
-    # Assign sequential candidate IDs after sorting.
-    final: List[Candidate] = []
-    for idx, c in enumerate(unique_candidates):
-        final.append(
+    # 3. Post-discovery processing cap (safety limit)
+    total_discovered = len(unique_candidates)
+    cap_enforced = total_discovered > MAX_CANDIDATES
+    omitted = max(0, total_discovered - MAX_CANDIDATES)
+
+    _last_scan_metadata = {
+        "total_discovered_candidates": total_discovered,
+        "candidate_cap_enforced": cap_enforced,
+        "candidates_omitted": omitted,
+    }
+
+    if cap_enforced:
+        retained = unique_candidates[:MAX_CANDIDATES]
+    else:
+        retained = unique_candidates
+
+    # 4. Assign sequential candidate IDs
+    preliminary: List[Candidate] = []
+    for idx, c in enumerate(retained):
+        preliminary.append(
             Candidate(
                 candidate_id=f"cand-{idx}",
                 format=c.format,
@@ -223,6 +420,8 @@ def scan_evidence(data: bytes) -> List[Candidate]:
             )
         )
 
+    # 5. Spatial relationship analysis
+    final = _compute_candidate_relationships(preliminary)
     return final
 
 

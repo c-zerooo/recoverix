@@ -26,7 +26,7 @@ from backend.app.models.recovery_run import (
     ReconstructionStep,
 )
 from backend.app.store import store
-from backend.app.recovery.scanner import scan_evidence, Candidate
+from backend.app.recovery.scanner import scan_evidence, Candidate, get_last_scan_metadata
 from backend.app.recovery.carver import carve_candidate, RecoveredArtifact
 from backend.app.recovery.validators import validate_artifact, VALIDATORS
 from backend.app.recovery.validators.pdf import reconstruct_pdf_xref
@@ -100,8 +100,18 @@ def _finalize_recovery_run(
     output_raw: bytes,
     detection_mode: str,
 ) -> RecoveryRun:
-    """Shared finalization helper: assesses completeness, enforces status guards, constructs and persists RecoveryRun."""
     prov_dict["detection_mode"] = detection_mode
+
+    # Coordinate system provenance guard
+    if "coordinate_system" not in prov_dict:
+        if candidate_id is None:
+            prov_dict["evidence_start"] = 0
+            prov_dict["evidence_end"] = len(output_raw)
+            prov_dict["coordinate_system"] = "whole_buffer_fallback"
+            prov_dict.setdefault("relationships", [])
+        else:
+            prov_dict["coordinate_system"] = "physical_evidence_offsets"
+            prov_dict.setdefault("relationships", [])
 
     # Absolute final invariant guard:
     # FULLY_RECOVERED is permitted ONLY when:
@@ -168,8 +178,11 @@ def _create_error_recovery_run(
     case_id: Optional[str] = None,
     artifact_id: Optional[str] = None,
     detection_mode: str = "known_file",
+    scan_meta: Optional[Dict[str, Any]] = None,
 ) -> RecoveryRun:
     """Constructs an isolated UNRECOVERABLE run when a candidate raises an unexpected exception."""
+    if scan_meta is None:
+        scan_meta = get_last_scan_metadata()
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     started_at, events, emit_event = _init_trace_context(run_id)
     cand_id = getattr(cand, "candidate_id", None)
@@ -180,6 +193,21 @@ def _create_error_recovery_run(
     emit_event("RECOVERY_COMPLETED", "Recovery run completed with status 'UNRECOVERABLE'")
 
     completed_at = datetime.now(timezone.utc)
+    prov_dict = {
+        "detection_mode": detection_mode,
+        "error": str(error),
+        "evidence_start": getattr(cand, "offset", 0),
+        "evidence_end": getattr(cand, "estimated_end_offset", None),
+        "coordinate_system": "physical_evidence_offsets",
+        "detection_method": getattr(cand, "detection_method", "unknown"),
+        "relationships": [
+            asdict(r) if hasattr(r, "__dataclass_fields__") else r
+            for r in getattr(cand, "relationships", ())
+        ],
+        "candidate_cap_enforced": scan_meta.get("candidate_cap_enforced", False) if scan_meta else False,
+        "total_discovered_candidates": scan_meta.get("total_discovered_candidates", 0) if scan_meta else 0,
+        "candidates_omitted": scan_meta.get("candidates_omitted", 0) if scan_meta else 0,
+    }
     run = RecoveryRun(
         run_id=run_id,
         case_id=case_id,
@@ -200,7 +228,7 @@ def _create_error_recovery_run(
         events=events,
         validation={"error": str(error)},
         confidence={"total": 0.0},
-        provenance={"detection_mode": detection_mode, "error": str(error)},
+        provenance=prov_dict,
         output=None,
         detection_mode=detection_mode,
     )
@@ -215,13 +243,21 @@ def _recover_contiguous_candidate(
     case_id: Optional[str] = None,
     artifact_id: Optional[str] = None,
     detection_mode: str = "known_file",
+    scan_meta: Optional[Dict[str, Any]] = None,
 ) -> RecoveryRun:
     """Execute traced recovery for a single contiguous candidate with known boundaries."""
+    if scan_meta is None:
+        scan_meta = get_last_scan_metadata()
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     started_at, events, emit_event = _init_trace_context(run_id)
 
     emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
     emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
+    if scan_meta and scan_meta.get("candidate_cap_enforced"):
+        emit_event(
+            "SCANNING_COMPLETED",
+            f"Candidate cap enforced: processed first 250 of {scan_meta['total_discovered_candidates']} discovered candidates ({scan_meta['candidates_omitted']} omitted)",
+        )
     emit_event(
         "FORMAT_DETECTED",
         f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
@@ -230,7 +266,21 @@ def _recover_contiguous_candidate(
     emit_event(
         "CANDIDATE_FOUND",
         f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
-        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+        relevant_artifact_info={
+            "candidate_id": cand.candidate_id,
+            "offset": cand.offset,
+            "evidence_start": cand.offset,
+            "evidence_end": cand.estimated_end_offset,
+            "coordinate_system": "physical_evidence_offsets",
+            "relationships": [
+                {
+                    "target_candidate_id": r.target_candidate_id,
+                    "target_format": r.target_format,
+                    "relationship_type": r.relationship_type,
+                }
+                for r in getattr(cand, "relationships", ())
+            ],
+        },
     )
     fmt = cand.format
     validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
@@ -400,6 +450,23 @@ def _recover_contiguous_candidate(
         val_details_dict = {"error": str(e)}
 
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else carved_bytes
+    prov_dict["evidence_start"] = cand.offset
+    prov_dict["evidence_end"] = cand.estimated_end_offset
+    prov_dict["coordinate_system"] = "physical_evidence_offsets"
+    prov_dict["detection_method"] = cand.detection_method
+    prov_dict["relationships"] = [
+        {
+            "target_candidate_id": r.target_candidate_id,
+            "target_format": r.target_format,
+            "relationship_type": r.relationship_type,
+        }
+        for r in getattr(cand, "relationships", ())
+    ]
+    if scan_meta:
+        prov_dict["candidate_cap_enforced"] = scan_meta.get("candidate_cap_enforced", False)
+        prov_dict["total_discovered_candidates"] = scan_meta.get("total_discovered_candidates", 0)
+        prov_dict["candidates_omitted"] = scan_meta.get("candidates_omitted", 0)
+
     return _finalize_recovery_run(
         run_id=run_id,
         started_at=started_at,
@@ -433,8 +500,11 @@ def _recover_bifragment_candidate_pair(
     cand2: Candidate,
     case_id: Optional[str] = None,
     detection_mode: str = "known_file",
+    scan_meta: Optional[Dict[str, Any]] = None,
 ) -> RecoveryRun:
     """Execute traced recovery for a bifragment candidate pair of matching formats."""
+    if scan_meta is None:
+        scan_meta = get_last_scan_metadata()
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     started_at, events, emit_event = _init_trace_context(run_id)
 
@@ -442,6 +512,11 @@ def _recover_bifragment_candidate_pair(
         "RECOVERY_STARTED",
         f"Started recovery run for '{filename}' bifragment pair '{cand.candidate_id}' + '{cand2.candidate_id}'",
     )
+    if scan_meta and scan_meta.get("candidate_cap_enforced"):
+        emit_event(
+            "SCANNING_COMPLETED",
+            f"Candidate cap enforced: processed first 250 of {scan_meta['total_discovered_candidates']} discovered candidates ({scan_meta['candidates_omitted']} omitted)",
+        )
     emit_event(
         "FORMAT_DETECTED",
         f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
@@ -450,7 +525,21 @@ def _recover_bifragment_candidate_pair(
     emit_event(
         "CANDIDATE_FOUND",
         f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
-        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+        relevant_artifact_info={
+            "candidate_id": cand.candidate_id,
+            "offset": cand.offset,
+            "evidence_start": cand.offset,
+            "evidence_end": cand.estimated_end_offset,
+            "coordinate_system": "physical_evidence_offsets",
+            "relationships": [
+                {
+                    "target_candidate_id": r.target_candidate_id,
+                    "target_format": r.target_format,
+                    "relationship_type": r.relationship_type,
+                }
+                for r in getattr(cand, "relationships", ())
+            ],
+        },
     )
     emit_event(
         "FORMAT_DETECTED",
@@ -460,7 +549,21 @@ def _recover_bifragment_candidate_pair(
     emit_event(
         "CANDIDATE_FOUND",
         f"Candidate '{cand2.candidate_id}' located at offset {cand2.offset} via {cand2.detection_method}",
-        relevant_artifact_info={"candidate_id": cand2.candidate_id, "offset": cand2.offset},
+        relevant_artifact_info={
+            "candidate_id": cand2.candidate_id,
+            "offset": cand2.offset,
+            "evidence_start": cand2.offset,
+            "evidence_end": cand2.estimated_end_offset,
+            "coordinate_system": "physical_evidence_offsets",
+            "relationships": [
+                {
+                    "target_candidate_id": r.target_candidate_id,
+                    "target_format": r.target_format,
+                    "relationship_type": r.relationship_type,
+                }
+                for r in getattr(cand2, "relationships", ())
+            ],
+        },
     )
     fmt = cand.format
     validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
@@ -619,6 +722,24 @@ def _recover_bifragment_candidate_pair(
         val_details_dict = {"error": str(e)}
 
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else (frag_a_bytes + frag_b_bytes)
+    prov_dict["evidence_start"] = cand.offset
+    prov_dict["evidence_end"] = cand2.estimated_end_offset
+    prov_dict["coordinate_system"] = "physical_evidence_offsets"
+    prov_dict["detection_method"] = cand.detection_method
+    prov_dict["bifragment_offsets"] = [cand.offset, cand2.offset]
+    prov_dict["relationships"] = [
+        {
+            "target_candidate_id": r.target_candidate_id,
+            "target_format": r.target_format,
+            "relationship_type": r.relationship_type,
+        }
+        for r in getattr(cand, "relationships", ())
+    ]
+    if scan_meta:
+        prov_dict["candidate_cap_enforced"] = scan_meta.get("candidate_cap_enforced", False)
+        prov_dict["total_discovered_candidates"] = scan_meta.get("total_discovered_candidates", 0)
+        prov_dict["candidates_omitted"] = scan_meta.get("candidates_omitted", 0)
+
     return _finalize_recovery_run(
         run_id=run_id,
         started_at=started_at,
@@ -653,13 +774,21 @@ def _recover_standalone_candidate(
     artifact_id: Optional[str] = None,
     detection_mode: str = "known_file",
     next_offset: Optional[int] = None,
+    scan_meta: Optional[Dict[str, Any]] = None,
 ) -> RecoveryRun:
     """Execute traced recovery for a single candidate without estimated end offset."""
+    if scan_meta is None:
+        scan_meta = get_last_scan_metadata()
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     started_at, events, emit_event = _init_trace_context(run_id)
 
     emit_event("RECOVERY_STARTED", f"Started recovery run for '{filename}' candidate '{cand.candidate_id}'")
     emit_event("SCANNING_STARTED", f"Scanning {len(content)} bytes for format signatures")
+    if scan_meta and scan_meta.get("candidate_cap_enforced"):
+        emit_event(
+            "SCANNING_COMPLETED",
+            f"Candidate cap enforced: processed first 250 of {scan_meta['total_discovered_candidates']} discovered candidates ({scan_meta['candidates_omitted']} omitted)",
+        )
     emit_event(
         "FORMAT_DETECTED",
         f"Detected format signature '{cand.format}' at byte offset {cand.offset}",
@@ -668,7 +797,21 @@ def _recover_standalone_candidate(
     emit_event(
         "CANDIDATE_FOUND",
         f"Candidate '{cand.candidate_id}' located at offset {cand.offset} via {cand.detection_method}",
-        relevant_artifact_info={"candidate_id": cand.candidate_id, "offset": cand.offset},
+        relevant_artifact_info={
+            "candidate_id": cand.candidate_id,
+            "offset": cand.offset,
+            "evidence_start": cand.offset,
+            "evidence_end": cand.estimated_end_offset,
+            "coordinate_system": "physical_evidence_offsets",
+            "relationships": [
+                {
+                    "target_candidate_id": r.target_candidate_id,
+                    "target_format": r.target_format,
+                    "relationship_type": r.relationship_type,
+                }
+                for r in getattr(cand, "relationships", ())
+            ],
+        },
     )
     fmt = cand.format
     validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
@@ -990,6 +1133,23 @@ def _recover_standalone_candidate(
             val_details_dict = {"error": str(e)}
 
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content[cand.offset:bound_end]
+    prov_dict["evidence_start"] = cand.offset
+    prov_dict["evidence_end"] = cand.estimated_end_offset
+    prov_dict["coordinate_system"] = "physical_evidence_offsets"
+    prov_dict["detection_method"] = cand.detection_method
+    prov_dict["relationships"] = [
+        {
+            "target_candidate_id": r.target_candidate_id,
+            "target_format": r.target_format,
+            "relationship_type": r.relationship_type,
+        }
+        for r in getattr(cand, "relationships", ())
+    ]
+    if scan_meta:
+        prov_dict["candidate_cap_enforced"] = scan_meta.get("candidate_cap_enforced", False)
+        prov_dict["total_discovered_candidates"] = scan_meta.get("total_discovered_candidates", 0)
+        prov_dict["candidates_omitted"] = scan_meta.get("candidates_omitted", 0)
+
     return _finalize_recovery_run(
         run_id=run_id,
         started_at=started_at,
@@ -1023,6 +1183,7 @@ def _recover_direct_fallback(
     artifact_id: Optional[str] = None,
     detection_mode: str = "known_file",
     forced_text_fmt: Optional[str] = None,
+    scan_meta: Optional[Dict[str, Any]] = None,
 ) -> RecoveryRun:
     """Execute direct fallback recovery when zero candidates are detected."""
     run_id = f"run_{uuid.uuid4().hex[:8]}"
@@ -1712,6 +1873,17 @@ def _recover_direct_fallback(
                 )
 
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content
+    prov_dict["evidence_start"] = 0
+    prov_dict["evidence_end"] = len(content)
+    prov_dict["coordinate_system"] = "whole_buffer_fallback"
+    prov_dict["relationships"] = []
+    if scan_meta is None:
+        scan_meta = get_last_scan_metadata()
+    if scan_meta:
+        prov_dict["candidate_cap_enforced"] = scan_meta.get("candidate_cap_enforced", False)
+        prov_dict["total_discovered_candidates"] = scan_meta.get("total_discovered_candidates", 0)
+        prov_dict["candidates_omitted"] = scan_meta.get("candidates_omitted", 0)
+
     return _finalize_recovery_run(
         run_id=run_id,
         started_at=started_at,
@@ -1795,36 +1967,49 @@ def execute_traced_recoveries(
     if candidates is not None:
         if len(candidates) == 0:
             return []
+        total_discovered = len(candidates)
+        cap_enforced = total_discovered > 250
+        omitted = max(0, total_discovered - 250)
+        scan_meta = {
+            "total_discovered_candidates": total_discovered,
+            "candidate_cap_enforced": cap_enforced,
+            "candidates_omitted": omitted,
+        }
         candidates_to_process = list(candidates)
+        if cap_enforced:
+            candidates_to_process = candidates_to_process[:250]
     else:
         candidates_to_process = scan_evidence(content)
+        scan_meta = get_last_scan_metadata()
 
         # Filter out spurious candidates when unambiguous evidence signatures or hints exist
-        if b"%PDF-" in content or ext_fmt == "pdf":
-            pdf_cands = [c for c in candidates_to_process if c.format == "pdf"]
-            if pdf_cands:
-                candidates_to_process = pdf_cands
-        elif PNG_SIGNATURE in content or ext_fmt == "png":
-            png_cands = [c for c in candidates_to_process if c.format == "png"]
-            if png_cands:
-                candidates_to_process = png_cands
-        elif ext_fmt in ("txt", "csv", "json") and not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
-            matching_cands = [c for c in candidates_to_process if c.format == ext_fmt]
-            if matching_cands:
-                candidates_to_process = matching_cands
-            else:
-                candidates_to_process = []
+        # ONLY enforce format suppression when running in known_file mode with a specific format hint
+        if detection_mode == "known_file":
+            if ext_fmt == "pdf":
+                pdf_cands = [c for c in candidates_to_process if c.format == "pdf"]
+                if pdf_cands:
+                    candidates_to_process = pdf_cands
+            elif ext_fmt == "png":
+                png_cands = [c for c in candidates_to_process if c.format == "png"]
+                if png_cands:
+                    candidates_to_process = png_cands
+            elif ext_fmt in ("txt", "csv", "json") and not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
+                matching_cands = [c for c in candidates_to_process if c.format == ext_fmt]
+                if matching_cands:
+                    candidates_to_process = matching_cands
+                else:
+                    candidates_to_process = []
 
-        if not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
-            if not (b"%PDF-" in content or PNG_SIGNATURE in content or content.startswith(b"\xff\xd8") or content.startswith(b"<?xml")):
-                probe_csv = detect_text_fragments(content, "csv")
-                probe_txt = detect_text_fragments(content, "txt")
-                if len(probe_csv) >= 2 and (ext_fmt == "csv" or not ext_fmt):
-                    candidates_to_process = []
-                    forced_text_fmt = "csv"
-                elif len(probe_txt) >= 2 and (ext_fmt == "txt" or not ext_fmt):
-                    candidates_to_process = []
-                    forced_text_fmt = "txt"
+            if not any(c.detection_method == "synthetic_boundary" for c in candidates_to_process):
+                if not (b"%PDF-" in content or PNG_SIGNATURE in content or content.startswith(b"\xff\xd8") or content.startswith(b"<?xml")):
+                    probe_csv = detect_text_fragments(content, "csv")
+                    probe_txt = detect_text_fragments(content, "txt")
+                    if len(probe_csv) >= 2 and (ext_fmt == "csv" or not ext_fmt):
+                        candidates_to_process = []
+                        forced_text_fmt = "csv"
+                    elif len(probe_txt) >= 2 and (ext_fmt == "txt" or not ext_fmt):
+                        candidates_to_process = []
+                        forced_text_fmt = "txt"
 
     # Deterministic sorting: offset ascending, header length ascending, candidate_id ascending
     candidates_to_process.sort(
@@ -1843,6 +2028,7 @@ def execute_traced_recoveries(
             artifact_id=None,
             detection_mode=detection_mode,
             forced_text_fmt=forced_text_fmt,
+            scan_meta=scan_meta,
         )
         return [fallback_run]
 
@@ -1866,6 +2052,7 @@ def execute_traced_recoveries(
                     cand2=cand2,
                     case_id=case_id,
                     detection_mode=detection_mode,
+                    scan_meta=scan_meta,
                 )
                 runs.append(pair_run)
                 idx += 2
@@ -1876,6 +2063,7 @@ def execute_traced_recoveries(
                     cand=cand,
                     case_id=case_id,
                     detection_mode=detection_mode,
+                    scan_meta=scan_meta,
                 )
                 runs.append(contig_run)
                 idx += 1
@@ -1893,6 +2081,7 @@ def execute_traced_recoveries(
                     case_id=case_id,
                     detection_mode=detection_mode,
                     next_offset=next_offset,
+                    scan_meta=scan_meta,
                 )
                 runs.append(standalone_run)
                 idx += 1
@@ -1904,6 +2093,7 @@ def execute_traced_recoveries(
                 error=exc,
                 case_id=case_id,
                 detection_mode=detection_mode or "known_file",
+                scan_meta=scan_meta,
             )
             runs.append(err_run)
             idx += 1
