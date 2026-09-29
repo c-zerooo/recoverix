@@ -1,5 +1,5 @@
 """
-store.py — Thread-safe in-memory repository and storage facade for Recoverix.
+store.py — Storage facade and live application repository instance for Recoverix.
 
 Re-exports repository contracts and provides the singleton `store` instance.
 """
@@ -14,9 +14,10 @@ from backend.app.storage.contracts import (
 )
 from backend.app.storage.blob_store import InMemoryBlobStore
 from backend.app.storage.memory_store import InMemoryStore, MAX_EVIDENCE_SIZE
+from backend.app.storage.sqlite_store import SqliteStore
 
-# Global store instance (facade for in-memory repositories)
-store = InMemoryStore()
+# Global live store instance (SQLite repository implementation)
+store = SqliteStore()
 
 __all__ = [
     "MAX_EVIDENCE_SIZE",
@@ -26,5 +27,6 @@ __all__ = [
     "RecoveryRunRepository",
     "InMemoryBlobStore",
     "InMemoryStore",
+    "SqliteStore",
     "store",
 ]

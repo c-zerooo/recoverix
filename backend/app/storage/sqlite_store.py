@@ -13,7 +13,7 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from backend.app.ingestion import Chunk, chunk_evidence, compute_metadata
 from backend.app.models.artifact import ArtifactRecord, ArtifactResponse
@@ -164,10 +164,31 @@ def _row_to_recovery_run(row: sqlite3.Row) -> RecoveryRun:
 class SqliteStore(CaseRepository, ArtifactRepository, RecoveryRunRepository):
     """Thread-safe persistent SQLite store conforming to Recoverix repository contracts."""
 
-    def __init__(self, engine: Optional[SqliteEngine] = None) -> None:
-        """Initialize with an optional SqliteEngine instance."""
+    def __init__(self, engine: Optional[Union[SqliteEngine, str]] = None) -> None:
+        """Initialize with an optional SqliteEngine instance or database path string.
+
+        If engine is None, instantiates a default SqliteEngine.
+        If engine is a str, instantiates SqliteEngine(db_path=engine).
+        """
         if engine is None:
             engine = SqliteEngine()
+        elif isinstance(engine, str):
+            engine = SqliteEngine(db_path=engine)
+        self._engine = engine
+        self._engine.initialize()
+        self._blobs = SqliteBlobStore(self._engine)
+
+    def close(self) -> None:
+        """Close the underlying SQLite engine and release resources."""
+        self._engine.close()
+
+    def reconfigure(self, engine: Optional[Union[SqliteEngine, str]] = None) -> None:
+        """Reconfigure store to use a different engine or database path."""
+        self._engine.close()
+        if engine is None:
+            engine = SqliteEngine()
+        elif isinstance(engine, str):
+            engine = SqliteEngine(db_path=engine)
         self._engine = engine
         self._engine.initialize()
         self._blobs = SqliteBlobStore(self._engine)

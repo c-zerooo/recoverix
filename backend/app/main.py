@@ -4,20 +4,31 @@ main.py — FastAPI application entrypoint for Recoverix platform.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from backend.app.api.cases import router as cases_router
 from backend.app.api.analysis import router as analysis_router
 from backend.app.api.artifacts import router as artifacts_router
 from backend.app.api.file_recovery import router as file_recovery_router
 from backend.app.api.recovery_runs import router as recovery_runs_router
+from backend.app.store import store
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    if hasattr(store, "close") and callable(store.close):
+        store.close()
+
 
 app = FastAPI(
     title="Recoverix Forensic Recovery API",
     description="Deterministic forensic artifact recovery, analysis, confidence scoring, and provenance platform.",
     version="1.0.0",
+    lifespan=lifespan,
 )
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
