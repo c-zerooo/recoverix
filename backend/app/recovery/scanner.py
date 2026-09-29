@@ -192,6 +192,9 @@ def scan_evidence(data: bytes) -> List[Candidate]:
     # ── Pass 6: scan for blind JSON container documents ─────────
     _scan_json(data, evidence_len, candidates)
 
+    # ── Pass 7: scan for blind TXT and CSV candidates ───────────
+    _scan_text_and_csv(data, evidence_len, candidates)
+
     # Deduplicate candidates sharing exact same offset and format
     seen = set()
     unique_candidates = []
@@ -955,3 +958,195 @@ def _scan_json(
         else:
             search_from = pos + 1
             continue
+
+
+def _scan_text_and_csv(
+    data: bytes,
+    evidence_len: int,
+    candidates: List[Candidate],
+) -> None:
+    """Find blind TXT and CSV candidate runs in *data* based on text-run heuristics and mandatory validation."""
+    from backend.app.recovery.validators.csv import validate_csv
+    from backend.app.recovery.validators.text import validate_txt
+
+    MIN_CANDIDATE_LEN = 64
+    MIN_PRINTABLE_DENSITY = 0.90
+    MIN_LOGICAL_NEWLINES = 2
+
+    # Collect ranges occupied by synthetic boundary candidates to preserve synthetic harness behavior
+    synthetic_ranges = []
+    for c in candidates:
+        if c.detection_method == "synthetic_boundary":
+            c_end = c.estimated_end_offset if c.estimated_end_offset is not None else evidence_len
+            synthetic_ranges.append((c.offset, c_end))
+
+    i = 0
+    while i < evidence_len:
+        # 1. Skip if current position is inside a synthetic candidate range
+        in_synthetic = False
+        for s_start, s_end in synthetic_ranges:
+            if s_start <= i < s_end:
+                i = s_end
+                in_synthetic = True
+                break
+        if in_synthetic:
+            continue
+
+        # 2. Skip non-text bytes to locate start of potential text run
+        b = data[i]
+        is_text_start = False
+        step = 1
+
+        if (0x20 <= b <= 0x7E) or b in (9, 10, 13):
+            is_text_start = True
+        elif 0xC2 <= b <= 0xF4:
+            for s in (2, 3, 4):
+                if i + s <= evidence_len:
+                    try:
+                        ch = data[i : i + s].decode("utf-8")
+                        if ch.isprintable():
+                            is_text_start = True
+                            step = s
+                            break
+                    except UnicodeDecodeError:
+                        pass
+
+        if not is_text_start:
+            i += 1
+            continue
+
+        # Found start of text run
+        start = i
+        j = i + step
+        printable_bytes = step
+
+        # 3. Advance j until a run terminator is encountered
+        terminated_on_invalid_utf8 = False
+        while j < evidence_len:
+            # Check synthetic boundary collision
+            collided_synthetic = False
+            for s_start, s_end in synthetic_ranges:
+                if s_start <= j < s_end:
+                    collided_synthetic = True
+                    break
+            if collided_synthetic:
+                break
+
+            jb = data[j]
+            # NUL byte is a hard terminator
+            if jb == 0:
+                break
+
+            # Printable ASCII / whitespace
+            if (0x20 <= jb <= 0x7E) or jb in (9, 10, 13):
+                printable_bytes += 1
+                j += 1
+                continue
+
+            # Multi-byte UTF-8
+            if 0xC2 <= jb <= 0xF4:
+                matched_multibyte = False
+                for s in (2, 3, 4):
+                    if j + s <= evidence_len:
+                        try:
+                            ch = data[j : j + s].decode("utf-8")
+                            if ch.isprintable():
+                                printable_bytes += s
+                                j += s
+                                matched_multibyte = True
+                                break
+                        except UnicodeDecodeError:
+                            pass
+                if matched_multibyte:
+                    continue
+
+            # 1-byte control character (not 9, 10, 13)
+            if jb < 32 or jb == 127:
+                curr_len = (j - start) + 1
+                if (printable_bytes / curr_len) < MIN_PRINTABLE_DENSITY:
+                    break
+                # If two consecutive control bytes, terminate run
+                if j + 1 < evidence_len and (data[j + 1] < 32 or data[j + 1] == 127) and data[j + 1] not in (9, 10, 13):
+                    break
+                j += 1
+                continue
+
+            # Any invalid UTF-8 byte terminates the run
+            terminated_on_invalid_utf8 = True
+            break
+
+        # 4. Trim incomplete trailing UTF-8 sequences and trailing non-printable control bytes
+        while j > start:
+            try:
+                data[start:j].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                j -= 1
+
+        while j > start and data[j - 1] < 32 and data[j - 1] not in (9, 10, 13):
+            j -= 1
+
+        # Trim trailing incomplete lines where appropriate
+        if b"\n" in data[start:j]:
+            last_nl = data[start:j].rfind(b"\n")
+            trailing_segment = data[start + last_nl + 1 : j]
+            if trailing_segment:
+                has_non_printable = any(
+                    (tb < 32 and tb not in (9, 10, 13)) or tb == 127
+                    for tb in trailing_segment
+                )
+                if has_non_printable or terminated_on_invalid_utf8:
+                    j = start + last_nl + 1
+
+        run_bytes = data[start:j]
+        run_len = len(run_bytes)
+
+        # 5. Check heuristics
+        if run_len >= MIN_CANDIDATE_LEN:
+            # Standalone whole-buffer text files (no surrounding evidence boundaries)
+            # are preserved for the canonical direct fallback recovery path.
+            if start == 0 and j == evidence_len:
+                i = max(j, i + 1)
+                continue
+
+            newlines = run_bytes.count(b"\n") + (run_bytes.count(b"\r") - run_bytes.count(b"\r\n"))
+            density = printable_bytes / run_len if run_len > 0 else 0.0
+
+            if newlines >= MIN_LOGICAL_NEWLINES and density >= MIN_PRINTABLE_DENSITY:
+                first_nl = run_bytes.find(b"\n")
+                first_line_len = (first_nl + 1) if first_nl != -1 else 1
+
+                # 6. Mandatory Validation Gate
+                # First test CSV
+                val_csv = validate_csv(run_bytes)
+                if val_csv.valid:
+                    candidates.append(
+                        Candidate(
+                            candidate_id="",
+                            format="csv",
+                            mime_type="text/csv",
+                            category="text",
+                            offset=start,
+                            detected_header_length=first_line_len,
+                            estimated_end_offset=j,
+                            detection_method="heuristic_text_run",
+                        )
+                    )
+
+                # Then independently test TXT
+                val_txt = validate_txt(run_bytes)
+                if val_txt.valid:
+                    candidates.append(
+                        Candidate(
+                            candidate_id="",
+                            format="txt",
+                            mime_type="text/plain",
+                            category="text",
+                            offset=start,
+                            detected_header_length=first_line_len,
+                            estimated_end_offset=j,
+                            detection_method="heuristic_text_run",
+                        )
+                    )
+
+        i = max(j, i + 1)

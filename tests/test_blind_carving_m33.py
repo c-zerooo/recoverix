@@ -536,3 +536,428 @@ def test_23_xml_tag_name_boundary_matching():
     assert val_res.valid is True
     assert len(val_res.errors) == 0
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BLIND TXT & CSV CANDIDATE GENERATION TESTS (Cases 24 - 41)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_24_raw_txt_embedded_in_binary_noise():
+    """24. Raw unannotated TXT embedded inside arbitrary binary noise."""
+    prefix = b"\x00\xFF\xFE\x01\x02\x03\xDE\xAD\xBE\xEF"
+    txt_doc = (
+        b"Incident Response Forensic Report\n"
+        b"Timestamp: 2026-09-29T12:00:00Z\n"
+        b"Status: All core subsystem operations verified\n"
+    )
+    suffix = b"\x12\x34\x56\x78\x9A\xBC\xDE\xF0\xFF\xEE\xDD\xCC"
+    evidence = prefix + txt_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(txt_cands) == 1
+    cand = txt_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(txt_doc)
+    assert cand.format == "txt"
+    assert cand.mime_type == "text/plain"
+    assert cand.category == "text"
+    assert cand.detection_method == "heuristic_text_run"
+
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    assert carved == txt_doc
+
+    from backend.app.recovery.validators.text import validate_txt
+    val_res = validate_txt(carved)
+    assert val_res.valid is True
+    assert len(val_res.errors) == 0
+
+
+def test_25_raw_comma_csv_embedded_in_binary_noise():
+    """25. Raw unannotated comma-delimited CSV embedded inside binary noise."""
+    prefix = b"\xAA\xBB\xCC\x00\x01\x02\x03"
+    csv_doc = (
+        b"id,name,role,department\n"
+        b"101,Alice,Admin,Security\n"
+        b"102,Bob,Analyst,Forensics\n"
+        b"103,Charlie,Auditor,Compliance\n"
+    )
+    suffix = b"\x00\x00\xFF\xFE\xFD\xFC"
+    evidence = prefix + csv_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    # Both CSV and TXT candidates are emitted for valid tabular text
+    assert len(csv_cands) == 1
+    assert len(txt_cands) == 1
+
+    cand = csv_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(csv_doc)
+    assert cand.format == "csv"
+    assert cand.mime_type == "text/csv"
+    assert cand.detection_method == "heuristic_text_run"
+
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    assert carved == csv_doc
+
+    from backend.app.recovery.validators.csv import validate_csv
+    val_res = validate_csv(carved)
+    assert val_res.valid is True
+    assert len(val_res.errors) == 0
+
+
+def test_26_raw_semicolon_csv_embedded_in_binary_noise():
+    """26. Raw semicolon-delimited CSV embedded inside binary noise."""
+    prefix = b"\x00\x81\x82\x83\x00\x84"
+    csv_doc = (
+        b"id;name;department;level\n"
+        b"201;Dave;Security;Lead\n"
+        b"202;Eve;Engineering;Senior\n"
+        b"203;Frank;Operations;Staff\n"
+    )
+    suffix = b"\x00\x85\x86\x87"
+    evidence = prefix + csv_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+
+    assert len(csv_cands) == 1
+    cand = csv_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(csv_doc)
+
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    from backend.app.recovery.validators.csv import validate_csv
+    val_res = validate_csv(carved)
+    assert val_res.valid is True
+    assert val_res.details.get("delimiter") == ";"
+
+
+def test_27_raw_tsv_embedded_in_binary_noise():
+    """27. Raw tab-delimited TSV embedded inside binary noise."""
+    prefix = b"\x00\x01\x02\x03\x04"
+    csv_doc = (
+        b"metric\tvalue\tstatus\n"
+        b"cpu_usage\t42.5\tnormal\n"
+        b"mem_usage\t68.1\tnormal\n"
+        b"disk_io\t12.0\toptimal\n"
+    )
+    suffix = b"\x00\x05\x06\x07"
+    evidence = prefix + csv_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+
+    assert len(csv_cands) == 1
+    cand = csv_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(csv_doc)
+
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    from backend.app.recovery.validators.csv import validate_csv
+    val_res = validate_csv(carved)
+    assert val_res.valid is True
+    assert val_res.details.get("delimiter") == "\t"
+
+
+def test_28_raw_pipe_delimited_csv_embedded_in_binary_noise():
+    """28. Raw pipe-delimited CSV embedded inside binary noise."""
+    prefix = b"\xFF\xFE\x00\x01"
+    csv_doc = (
+        b"trace_id|service|duration_ms\n"
+        b"trc-101|auth_gateway|14.2\n"
+        b"trc-102|database_proxy|6.8\n"
+        b"trc-103|cache_cluster|1.1\n"
+    )
+    suffix = b"\x00\xFF\xEE"
+    evidence = prefix + csv_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+
+    assert len(csv_cands) == 1
+    cand = csv_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(csv_doc)
+
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    from backend.app.recovery.validators.csv import validate_csv
+    val_res = validate_csv(carved)
+    assert val_res.valid is True
+    assert val_res.details.get("delimiter") == "|"
+
+
+def test_29_multiple_independent_txt_and_csv_artifacts():
+    """29. Multiple independent TXT and CSV artifacts in a single evidence dump."""
+    noise1 = b"\x00\xFF\xFE\x01\x02"
+    txt_doc = (
+        b"Log Entry 001\n"
+        b"Component: Authentication Service\n"
+        b"Event: User login succeeded\n"
+    )
+    noise2 = b"\x00\x00\xAA\xBB\xCC\x00"
+    csv_doc = (
+        b"code,description,severity\n"
+        b"ERR_01,Connection timeout,HIGH\n"
+        b"ERR_02,Buffer overflow,CRITICAL\n"
+        b"ERR_03,Resource exhausted,MEDIUM\n"
+    )
+    noise3 = b"\x00\xFF\x11\x22"
+    evidence = noise1 + txt_doc + noise2 + csv_doc + noise3
+
+    candidates = scan_evidence(evidence)
+
+    txt_candidates = [c for c in candidates if c.format == "txt"]
+    csv_candidates = [c for c in candidates if c.format == "csv"]
+
+    assert len(csv_candidates) >= 1
+    assert any(c.offset == len(noise1) and c.format == "txt" for c in txt_candidates)
+    expected_csv_offset = len(noise1) + len(txt_doc) + len(noise2)
+    assert any(c.offset == expected_csv_offset and c.format == "csv" for c in csv_candidates)
+
+
+def test_30_printable_density_below_90_percent_rejected():
+    """30. Evidence run with printable density below 90% is rejected."""
+    # Construct a 100-byte run with ~25% non-printable control bytes and 2 newlines
+    sparse_run = bytearray(b"Line one of data\nLine two of data\n")
+    while len(sparse_run) < 100:
+        sparse_run.extend(b"\x01\x02\x03\x04ABCD")
+    evidence = b"\x00\xFF" + bytes(sparse_run) + b"\x00\xFF"
+
+    candidates = scan_evidence(evidence)
+    text_cands = [c for c in candidates if c.format in ("txt", "csv")]
+    assert len(text_cands) == 0
+
+
+def test_31_fewer_than_two_newlines_rejected():
+    """31. Text run with fewer than 2 newlines is rejected by heuristic."""
+    prefix = b"\x00\xFF\xFE"
+    # Over 64 bytes of printable text, but 0 newlines
+    single_line = b"This is a long continuous single line text block without any newline characters at all."
+    suffix = b"\x00\xFF\xFE"
+    evidence = prefix + single_line + suffix
+
+    candidates = scan_evidence(evidence)
+    text_cands = [c for c in candidates if c.format in ("txt", "csv")]
+    assert len(text_cands) == 0
+
+    # Over 64 bytes with only 1 newline
+    one_newline = b"First half of text before the newline\nsecond half of text without trailing newline"
+    evidence2 = prefix + one_newline + suffix
+    candidates2 = scan_evidence(evidence2)
+    text_cands2 = [c for c in candidates2 if c.format in ("txt", "csv")]
+    assert len(text_cands2) == 0
+
+
+def test_32_candidate_shorter_than_64_bytes_rejected():
+    """32. Candidate shorter than 64 bytes is rejected even with 2 newlines."""
+    prefix = b"\x00\xFF\xFE"
+    short_text = b"Line 1: OK\nLine 2: OK\nLine 3: OK\n"  # 33 bytes
+    suffix = b"\x00\xFF\xFE"
+    evidence = prefix + short_text + suffix
+
+    candidates = scan_evidence(evidence)
+    text_cands = [c for c in candidates if c.format in ("txt", "csv")]
+    assert len(text_cands) == 0
+
+
+def test_33_crlf_newlines_handled():
+    """33. Text run with CRLF line endings is correctly detected and bounded."""
+    prefix = b"\x00\xFF\xFE\x01\x02"
+    crlf_doc = (
+        b"Configuration Header\r\n"
+        b"Parameter_Alpha = Enabled\r\n"
+        b"Parameter_Beta = 4096\r\n"
+        b"Parameter_Gamma = Verified\r\n"
+    )
+    suffix = b"\x00\xFF\xFE"
+    evidence = prefix + crlf_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(txt_cands) == 1
+    cand = txt_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(crlf_doc)
+    assert evidence[cand.offset:cand.estimated_end_offset] == crlf_doc
+
+
+def test_34_utf8_multibyte_text():
+    """34. Multi-byte UTF-8 characters maintain exact byte offsets without drift."""
+    prefix = b"\x00\x01\x02\x03\x04"
+    utf8_doc = (
+        "Отчёт о расследовании инцидента:\n"
+        "Статус: Успешно завершено\n"
+        "Подсистема: Защищённое хранилище 🔐\n"
+    ).encode("utf-8")
+    suffix = b"\x00\x05\x06\x07"
+    evidence = prefix + utf8_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(txt_cands) == 1
+    cand = txt_cands[0]
+    assert cand.offset == len(prefix)
+    assert cand.estimated_end_offset == len(prefix) + len(utf8_doc)
+    carved = evidence[cand.offset:cand.estimated_end_offset]
+    assert carved == utf8_doc
+
+    from backend.app.recovery.validators.text import validate_txt
+    val_res = validate_txt(carved)
+    assert val_res.valid is True
+
+
+def test_35_ragged_csv_emitted_only_as_txt():
+    """35. Text with varying comma counts fails CSV validation and is emitted strictly as TXT."""
+    prefix = b"\x00\xFF\xAA\xBB"
+    ragged_doc = (
+        b"In the beginning, when the system was initialized, nodes reported status OK.\n"
+        b"Later, after several minutes, a warning occurred.\n"
+        b"Finally, the system recovered successfully.\n"
+    )
+    suffix = b"\x00\xCC\xDD\xEE"
+    evidence = prefix + ragged_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(csv_cands) == 0
+    assert len(txt_cands) == 1
+    assert txt_cands[0].offset == len(prefix)
+
+
+def test_36_embedded_nul_byte_splits_runs():
+    """36. Embedded NUL byte acts as a hard boundary separating two independent runs."""
+    prefix = b"\x00\x01\x02"
+    doc1 = (
+        b"Block 1: System analysis report\n"
+        b"Date: 2026-09-29\n"
+        b"Status: First segment completed\n"
+    )
+    nul_gap = b"\x00\x00\x00\x00"
+    doc2 = (
+        b"Block 2: Forensic evidence dump\n"
+        b"Date: 2026-09-30\n"
+        b"Status: Second segment completed\n"
+    )
+    suffix = b"\x00\x03\x04"
+    evidence = prefix + doc1 + nul_gap + doc2 + suffix
+
+    candidates = scan_evidence(evidence)
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(txt_cands) == 2
+    assert txt_cands[0].offset == len(prefix)
+    assert txt_cands[0].estimated_end_offset == len(prefix) + len(doc1)
+    assert b"\x00" not in evidence[txt_cands[0].offset:txt_cands[0].estimated_end_offset]
+
+    expected_offset2 = len(prefix) + len(doc1) + len(nul_gap)
+    assert txt_cands[1].offset == expected_offset2
+    assert txt_cands[1].estimated_end_offset == expected_offset2 + len(doc2)
+    assert b"\x00" not in evidence[txt_cands[1].offset:txt_cands[1].estimated_end_offset]
+
+
+def test_37_synthetic_harness_unchanged():
+    """37. Synthetic harness candidates are preserved without duplicate heuristic candidates."""
+    from backend.app.recovery.signatures import SYNTHETIC_START_MARKER, SYNTHETIC_END_MARKER
+    synthetic_artifact = (
+        SYNTHETIC_START_MARKER
+        + b"\nfilename: note.txt\ndata: line 1 content\nline 2 content\n"
+        + SYNTHETIC_END_MARKER
+    )
+    padding = b"\x00" * 32
+    evidence = padding + synthetic_artifact + padding
+
+    candidates = scan_evidence(evidence)
+
+    assert len(candidates) == 1
+    assert candidates[0].format == "txt"
+    assert candidates[0].detection_method == "synthetic_boundary"
+
+
+def test_38_deterministic_scanning_and_input_immutability():
+    """38. Repeated scans produce byte-identical candidate attributes without mutating input."""
+    evidence = bytearray(
+        b"\x00\xFF"
+        + b"id,val,flag\n1,alpha,true\n2,beta,false\n3,gamma,true\n"
+        + b"\xAA\xBB"
+    )
+    copy_evidence = bytes(evidence)
+
+    r1 = scan_evidence(evidence)
+    r2 = scan_evidence(evidence)
+
+    assert len(r1) == len(r2)
+    for c1, c2 in zip(r1, r2):
+        assert c1.candidate_id == c2.candidate_id
+        assert c1.format == c2.format
+        assert c1.offset == c2.offset
+        assert c1.estimated_end_offset == c2.estimated_end_offset
+        assert c1.detection_method == c2.detection_method
+
+    assert bytes(evidence) == copy_evidence
+
+
+def test_39_adversarial_printable_ascii_insufficient_newlines():
+    """39. Adversarial dense printable ASCII data with only 1 newline is rejected."""
+    dense_ascii = (b"A" * 60) + b"\n" + (b"B" * 60)  # 121 bytes, 1 newline
+    evidence = b"\x00\xFF" + dense_ascii + b"\x00\xFF"
+
+    candidates = scan_evidence(evidence)
+    text_cands = [c for c in candidates if c.format in ("txt", "csv")]
+    assert len(text_cands) == 0
+
+
+def test_40_adversarial_source_code_emitted_as_txt():
+    """40. Python source code is detected as TXT and rejected as CSV."""
+    prefix = b"\x00\xFF\x01\x02"
+    code_doc = (
+        b"def process_evidence(buffer, max_len):\n"
+        b"    results = []\n"
+        b"    for item in buffer:\n"
+        b"        results.append(item.strip())\n"
+        b"    return results\n"
+    )
+    suffix = b"\x00\xFE\x03\x04"
+    evidence = prefix + code_doc + suffix
+
+    candidates = scan_evidence(evidence)
+    csv_cands = [c for c in candidates if c.format == "csv"]
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(csv_cands) == 0
+    assert len(txt_cands) == 1
+    assert txt_cands[0].offset == len(prefix)
+    assert txt_cands[0].estimated_end_offset == len(prefix) + len(code_doc)
+
+
+def test_41_adjacent_text_runs_separated_by_binary_noise():
+    """41. Two adjacent text runs separated by binary noise are both detected cleanly."""
+    noise_sep = b"\xDE\xAD\xBE\xEF\x01\x02\xFF"
+    txt1 = (
+        b"Section Alpha: Overview\n"
+        b"Timestamp: 2026-09-29\n"
+        b"Details: Initialized component\n"
+    )
+    txt2 = (
+        b"Section Beta: Results\n"
+        b"Timestamp: 2026-09-30\n"
+        b"Details: Verification passed\n"
+    )
+    evidence = b"\x00" + txt1 + noise_sep + txt2 + b"\x00"
+
+    candidates = scan_evidence(evidence)
+    txt_cands = [c for c in candidates if c.format == "txt"]
+
+    assert len(txt_cands) == 2
+    assert txt_cands[0].offset == 1
+    assert txt_cands[0].estimated_end_offset == 1 + len(txt1)
+    expected_offset2 = 1 + len(txt1) + len(noise_sep)
+    assert txt_cands[1].offset == expected_offset2
+    assert txt_cands[1].estimated_end_offset == expected_offset2 + len(txt2)
