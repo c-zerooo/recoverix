@@ -14,6 +14,8 @@ from typing import Protocol, Optional, Any, Dict, List
 
 from backend.app.models.interpretation import (
     ArtifactInterpretationContext,
+    ClusterInterpretationContext,
+    CaseInterpretationContext,
     ProviderInterpretationOutput,
 )
 
@@ -27,6 +29,18 @@ class InterpretationProvider(Protocol):
         self, context: ArtifactInterpretationContext
     ) -> ProviderInterpretationOutput:
         """Generate interpretive prose from deterministic artifact context."""
+        ...
+
+    def interpret_cluster(
+        self, context: ClusterInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        """Generate interpretive prose from deterministic cluster context."""
+        ...
+
+    def interpret_case(
+        self, context: CaseInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        """Generate executive forensic briefing prose from deterministic case context."""
         ...
 
 
@@ -194,6 +208,249 @@ class DeterministicRuleProvider:
             details=details,
         )
 
+    def interpret_cluster(
+        self, context: ClusterInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        facts = context.facts
+        rel_class = facts.relationship_classification
+        total_nodes = facts.total_nodes
+        formats_str = ", ".join(facts.member_formats) if facts.member_formats else "unknown"
+        v_bytes = facts.candidate_aggregate_verified_bytes
+        r_bytes = facts.candidate_aggregate_reconstructed_bytes
+        m_bytes = facts.candidate_aggregate_missing_bytes
+        u_bytes = facts.unique_physical_bytes
+        b_bytes = facts.bounded_physical_bytes
+        max_score = (
+            int(facts.max_confidence_score)
+            if float(facts.max_confidence_score).is_integer()
+            else round(facts.max_confidence_score, 2)
+        )
+        priority = facts.highest_priority
+        c_start = facts.cluster_start
+        c_end = facts.cluster_end
+
+        # Details list
+        if u_bytes is not None:
+            footprint_detail = f"Physical Evidence Footprint: {u_bytes} unique bytes across coordinate envelope [{c_start}, {c_end})."
+        else:
+            footprint_detail = f"Physical Evidence Footprint: Unbounded candidate span (lower bound: {b_bytes} bounded bytes from offset {c_start})."
+
+        volume_detail = (
+            f"Candidate Evaluation Volume: {v_bytes} verified bytes, {r_bytes} reconstructed bytes, "
+            f"{m_bytes} missing bytes across {total_nodes} candidate interpretation(s)."
+        )
+        classification_detail = f"Spatial Classification: {rel_class} across format(s): {formats_str}."
+        status_items = [f"{k}: {v}" for k, v in sorted(facts.status_distribution.items())]
+        status_detail = f"Recovery Status Distribution: {', '.join(status_items) or 'None'}."
+        priority_detail = f"Cluster Priority: {priority} (Max Confidence Score: {max_score}/100)."
+
+        details = [
+            footprint_detail,
+            volume_detail,
+            classification_detail,
+            status_detail,
+            priority_detail,
+        ]
+
+        summary = f"Grounded cluster synthesis for {rel_class} spatial component ({total_nodes} candidate{'s' if total_nodes > 1 else ''})."
+
+        # Classification-specific grounded narrative
+        if rel_class == "ISOLATED":
+            if total_nodes == 1:
+                assessment = (
+                    f"Single isolated candidate ({formats_str}) spanning "
+                    f"{u_bytes if u_bytes is not None else 'unbounded'} physical bytes. "
+                    "No spatial overlap or candidate competition detected."
+                )
+            else:
+                assessment = (
+                    f"Isolated candidate set spanning "
+                    f"{u_bytes if u_bytes is not None else 'unbounded'} physical bytes "
+                    "with no internal spatial overlap edges."
+                )
+            structural_context = (
+                "Uncontested extraction. Structural markers and validation proofs establish standalone artifact boundaries without conflicting interpretations."
+            )
+            limitations = (
+                "Standard deterministic boundary extraction. Zero heuristic spatial assumptions or speculative joins were applied."
+            )
+            recommended_next_steps = (
+                "Verify individual artifact validation status and integrate verified output into the investigation case file."
+            )
+
+        elif rel_class == "COEXTENSIVE_SET":
+            assessment = (
+                f"Direct competing format hypotheses over identical physical byte range [{c_start}, {c_end}). "
+                f"{total_nodes} candidate interpretations ({formats_str}) evaluate the same {u_bytes} physical bytes."
+            )
+            structural_context = (
+                f"Candidates occupy coextensive coordinates. Recoverix preserves all {total_nodes} competing format interpretations neutrally rather than arbitrarily declaring a single winning format."
+            )
+            limitations = (
+                f"Candidate aggregate volume ({v_bytes} verified bytes) reflects multiple format evaluations and must NOT be treated as {v_bytes} physical disk bytes. Physical footprint is strictly {u_bytes} bytes."
+            )
+            recommended_next_steps = (
+                f"Compare validation proofs and format-specific delimiter markers between competing formats ({formats_str}) to determine primary forensic interpretation."
+            )
+
+        elif rel_class == "CONTAINMENT_TREE":
+            c_edges = facts.containment_edge_count
+            assessment = (
+                f"Hierarchical structural containment detected ({c_edges} containment edge{'s' if c_edges != 1 else ''}). "
+                f"Outer container encompasses inner candidate payload(s) across a {u_bytes if u_bytes is not None else 'unbounded'}-byte physical span."
+            )
+            structural_context = (
+                f"Container-payload encapsulation across formats ({formats_str}). Embedded inner artifacts represent nested payloads rather than competing format hypotheses."
+            )
+            limitations = (
+                f"Candidate aggregate verified volume ({v_bytes} bytes) counts both enclosing container and inner payload bytes. Physical storage footprint is {u_bytes if u_bytes is not None else 'unbounded'} bytes."
+            )
+            recommended_next_steps = (
+                "Inspect the outer container structure and extract verified inner payloads for independent forensic validation."
+            )
+
+        elif rel_class == "OVERLAP_SPAN":
+            o_edges = facts.overlap_edge_count
+            assessment = (
+                f"Spatial boundary conflict detected ({o_edges} overlap edge{'s' if o_edges != 1 else ''}) across {total_nodes} candidates ({formats_str}) occupying a {u_bytes if u_bytes is not None else 'unbounded'}-byte union."
+            )
+            structural_context = (
+                "Partial coordinate intersection indicates possible filesystem fragmentation, cluster slack re-allocation, or sliding-window boundary collisions."
+            )
+            limitations = (
+                "Recoverix strictly refused to guess whether overlapping bytes represent fragmentation or carving false positives. Both candidate spans were preserved."
+            )
+            recommended_next_steps = (
+                "Conduct hex inspection on the intersection byte regions to verify sector boundary alignments and fragment continuity."
+            )
+
+        elif rel_class == "MIXED":
+            assessment = (
+                f"Complex hybrid spatial topology exhibiting multiple relationship families "
+                f"({facts.containment_edge_count} containment, {facts.overlap_edge_count} overlap, {facts.coextensive_candidate_count} coextensive) across {total_nodes} nodes."
+            )
+            structural_context = (
+                f"Multi-candidate relationship graph spanning formats ({formats_str}). Combines structural encapsulation and partial boundary overlaps."
+            )
+            limitations = (
+                "Complex graph topology with high structural ambiguity. Candidate aggregate volume does not reflect physical disk recovery."
+            )
+            recommended_next_steps = (
+                "Perform detailed graph traversal and manual hex analysis across cluster junction boundaries."
+            )
+
+        else:
+            assessment = f"Cluster evaluated with classification {rel_class}. {total_nodes} nodes across formats ({formats_str})."
+            structural_context = f"Cluster priority: {priority} (Max confidence score: {max_score}/100)."
+            limitations = "Zero heuristic AI predictions were used to generate evidence."
+            recommended_next_steps = "Perform manual forensic hex inspection on isolated anomaly regions."
+
+        return ProviderInterpretationOutput(
+            summary=summary,
+            assessment=assessment,
+            structural_context=structural_context,
+            limitations=limitations,
+            recommended_next_steps=recommended_next_steps,
+            details=details,
+        )
+
+    def interpret_case(
+        self, context: CaseInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        facts = context.facts
+        case_id = facts.case_id
+        tot_buffers = facts.total_evidence_buffers
+        tot_artifacts = facts.total_artifacts
+        tot_nodes = facts.total_nodes
+        tot_clusters = facts.total_clusters
+        coverage_bytes = facts.case_physical_coverage_bytes
+        v_bytes = facts.candidate_aggregate_verified_bytes
+        r_bytes = facts.candidate_aggregate_reconstructed_bytes
+        m_bytes = facts.candidate_aggregate_missing_bytes
+        unscoped_count = facts.unscoped_candidate_count
+        unscoped_v = facts.unscoped_aggregate_verified_bytes
+
+        status_dist = facts.status_distribution
+        priority_dist = facts.priority_distribution
+        format_dist = facts.format_distribution
+        cluster_dist = facts.cluster_classification_distribution
+
+        # Details bullets
+        coverage_str = f"{coverage_bytes} bytes" if coverage_bytes is not None else "Unbounded/Partial"
+        coverage_detail = f"Physical Evidence Coverage: {coverage_str} across {tot_buffers} scoped buffer(s)."
+        volume_detail = (
+            f"Candidate Evaluation Volume: {v_bytes} verified bytes, {r_bytes} reconstructed bytes, "
+            f"{m_bytes} missing bytes across {tot_artifacts} evaluated artifact(s)."
+        )
+        status_items = [f"{k}: {v}" for k, v in sorted(status_dist.items())]
+        status_detail = f"Recovery Status Distribution: {', '.join(status_items) or 'None'}."
+
+        cluster_items = [f"{k}: {v}" for k, v in sorted(cluster_dist.items())]
+        cluster_detail = f"Cluster Classification Distribution: {', '.join(cluster_items) or 'None'}."
+
+        format_items = [f"{k}: {v}" for k, v in sorted(format_dist.items())]
+        format_detail = f"Format Breakdown: {', '.join(format_items) or 'None'}."
+
+        details = [
+            coverage_detail,
+            volume_detail,
+            status_detail,
+            cluster_detail,
+            format_detail,
+        ]
+
+        if facts.candidate_cap_enforced:
+            details.append(
+                f"Candidate Budget Cap: ENFORCED ({facts.candidates_omitted} candidate(s) omitted from analysis pool)."
+            )
+        if unscoped_count > 0:
+            details.append(
+                f"Unscoped Candidates: {unscoped_count} candidate(s) evaluated outside physical buffer coordinates ({unscoped_v} verified bytes)."
+            )
+
+        summary = (
+            f"Executive forensic briefing for Case '{case_id}': {tot_nodes} candidate nodes analyzed "
+            f"across {tot_clusters} spatial cluster(s) and {tot_buffers} evidence buffer(s)."
+        )
+
+        fully_rec = status_dist.get("FULLY_RECOVERED", 0)
+        part_rec = status_dist.get("PARTIALLY_RECOVERED", 0)
+        corr_rec = status_dist.get("CORRUPTED", 0)
+        unrec_rec = status_dist.get("UNRECOVERABLE", 0)
+
+        assessment = (
+            f"Investigation case encompasses {tot_artifacts} total artifact(s) structured into {tot_clusters} spatial cluster(s). "
+            f"Overall recovery health: {fully_rec} fully recovered, {part_rec} partially recovered, "
+            f"{corr_rec} corrupted, and {unrec_rec} unrecoverable candidate(s)."
+        )
+
+        structural_context = (
+            f"Evidence relationship graph spans {tot_buffers} evidence buffer(s) and {tot_nodes} graph nodes. "
+            f"Spatial topology comprises: {', '.join(f'{k}: {v}' for k, v in sorted(cluster_dist.items())) or '0 clusters'}."
+        )
+
+        limitations = (
+            f"Physical evidence coverage ({coverage_str}) reflects unique 1D interval unions across scoped buffers. "
+            f"Candidate aggregate volume ({v_bytes} verified bytes) reflects multiple hypothesis evaluations and must NOT be interpreted as physical disk size."
+        )
+        if facts.candidate_cap_enforced:
+            limitations += (
+                f" Candidate cap was enforced: {facts.candidates_omitted} candidate(s) were omitted due to budget limits, representing a bounded evidence subset."
+            )
+
+        recommended_next_steps = (
+            "Prioritize examination of CRITICAL and HIGH priority clusters, review coextensive and overlapping boundary conflicts, and export mathematically verified evidence digests for judicial reporting."
+        )
+
+        return ProviderInterpretationOutput(
+            summary=summary,
+            assessment=assessment,
+            structural_context=structural_context,
+            limitations=limitations,
+            recommended_next_steps=recommended_next_steps,
+            details=details,
+        )
+
 
 class GeminiInterpretationProvider:
     """Optional external Gemini interpretation provider.
@@ -205,8 +462,8 @@ class GeminiInterpretationProvider:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-    def interpret_artifact(
-        self, context: ArtifactInterpretationContext
+    def _call_gemini(
+        self, prompt: str, default_summary: str
     ) -> ProviderInterpretationOutput:
         # Precedence: OFFLINE MODE > API KEY
         if os.getenv("RECOVERIX_OFFLINE", "0").lower() in ("1", "true", "yes"):
@@ -217,6 +474,52 @@ class GeminiInterpretationProvider:
 
         import httpx
 
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"response_mime_type": "application/json"},
+        }
+
+        with httpx.Client(timeout=3.5) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Gemini API returned HTTP status {resp.status_code}: {resp.text}")
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise ValueError("Gemini response contained no candidates")
+
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if not text:
+                raise ValueError("Gemini response candidate contained no text content")
+
+            parsed = json.loads(text)
+
+            summary = parsed.get("summary") or default_summary
+            assessment = parsed.get("assessment", "")
+            structural_context = parsed.get("structural_context") or parsed.get("why_it_matters", "")
+            limitations = parsed.get("limitations") or parsed.get("recovery_limitation", "")
+            recommended_next_steps = parsed.get("recommended_next_steps") or parsed.get("recommended_next_step", "")
+            details = parsed.get("details", [])
+            if not isinstance(details, list):
+                details = [str(details)]
+
+            if not assessment or not structural_context or not limitations or not recommended_next_steps:
+                raise ValueError(f"Gemini response missing required interpretive fields: {parsed.keys()}")
+
+            return ProviderInterpretationOutput(
+                summary=summary,
+                assessment=assessment,
+                structural_context=structural_context,
+                limitations=limitations,
+                recommended_next_steps=recommended_next_steps,
+                details=details,
+            )
+
+    def interpret_artifact(
+        self, context: ArtifactInterpretationContext
+    ) -> ProviderInterpretationOutput:
         facts_dict = {
             "artifact_id": context.facts.artifact_id,
             "filename": context.facts.filename,
@@ -253,46 +556,69 @@ class GeminiInterpretationProvider:
             '- "details": List of 3 to 5 concise analytical bullet statements.\n'
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"response_mime_type": "application/json"},
-        }
+        return self._call_gemini(
+            prompt,
+            default_summary=f"Grounded explanation for {context.facts.category} artifact.",
+        )
 
-        with httpx.Client(timeout=3.5) as client:
-            resp = client.post(url, json=payload)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API returned HTTP status {resp.status_code}: {resp.text}")
+    def interpret_cluster(
+        self, context: ClusterInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        facts = context.facts
+        facts_dict = facts.model_dump()
+        u_bytes_str = f"{facts.unique_physical_bytes} bytes" if facts.unique_physical_bytes is not None else "unbounded"
 
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("Gemini response contained no candidates")
+        prompt = (
+            "You are the Recoverix AI Evidence Analyst, a digital forensics investigator assistant.\n"
+            "Interpret ONLY the following deterministic spatial cluster facts established by the reconstruction and graph engines.\n"
+            "CRITICAL FORENSIC RULES:\n"
+            "1. You MUST NOT invent bytes, modify bytes, or override V/R/M.\n"
+            "2. You MUST NOT refer to candidate aggregate verified bytes as 'total bytes recovered' or 'physical disk recovery'.\n"
+            f"   The physical evidence footprint is {u_bytes_str}, whereas candidate evaluations total {facts.candidate_aggregate_verified_bytes} verified bytes across competing or nested format hypotheses.\n"
+            "3. In COEXTENSIVE clusters, you MUST NOT declare a single winning format or claim an alternative hypothesis is false. Compare competing format evidence neutrally.\n"
+            "4. You MUST NOT make legal conclusions, determine criminal intent, or identify suspects.\n"
+            "5. You MUST acknowledge all corrupted, missing, or reconstructed regions explicitly.\n\n"
+            f"DETERMINISTIC CLUSTER FACTS:\n{json.dumps(facts_dict, indent=2)}\n\n"
+            "Return a JSON object with EXACTLY these string keys:\n"
+            '- "summary": Concise executive overview.\n'
+            '- "assessment": Factual forensic analysis of surviving evidence vs conflicting hypotheses.\n'
+            '- "structural_context": Spatial relationships, format markers, container hierarchy, or boundary conflicts.\n'
+            '- "limitations": Explicit declaration of physical footprint vs candidate aggregate volumes and refusal to declare speculative winners.\n'
+            '- "recommended_next_steps": Concrete recommended next investigative step for examiners.\n'
+            '- "details": List of 3 to 5 concise analytical bullet statements.\n'
+        )
 
-            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            if not text:
-                raise ValueError("Gemini response candidate contained no text content")
+        return self._call_gemini(
+            prompt,
+            default_summary=f"Grounded cluster synthesis for {facts.relationship_classification} component.",
+        )
 
-            parsed = json.loads(text)
+    def interpret_case(
+        self, context: CaseInterpretationContext
+    ) -> ProviderInterpretationOutput:
+        facts = context.facts
+        facts_dict = facts.model_dump()
+        cov_str = f"{facts.case_physical_coverage_bytes} bytes" if facts.case_physical_coverage_bytes is not None else "partial/unbounded"
 
-            # Map legacy/alternate keys if returned by model
-            summary = parsed.get("summary") or f"Grounded explanation for {context.facts.category} artifact."
-            assessment = parsed.get("assessment", "")
-            structural_context = parsed.get("structural_context") or parsed.get("why_it_matters", "")
-            limitations = parsed.get("limitations") or parsed.get("recovery_limitation", "")
-            recommended_next_steps = parsed.get("recommended_next_steps") or parsed.get("recommended_next_step", "")
-            details = parsed.get("details", [])
-            if not isinstance(details, list):
-                details = [str(details)]
+        prompt = (
+            "You are the Recoverix AI Evidence Analyst, a digital forensics investigator assistant.\n"
+            "Interpret ONLY the following deterministic case facts and provide an executive forensic briefing.\n"
+            "CRITICAL FORENSIC RULES:\n"
+            "1. You MUST NOT invent bytes, modify bytes, or override V/R/M.\n"
+            "2. You MUST NOT call candidate aggregate volume 'total recovered bytes'. Physical evidence coverage across scoped buffers is {cov_str}.\n"
+            "3. If candidate_cap_enforced is True, you MUST explicitly disclose that candidates were omitted due to budget limits.\n"
+            "4. You MUST NOT make legal conclusions, determine criminal intent, or identify suspects.\n\n"
+            f"DETERMINISTIC CASE FACTS:\n{json.dumps(facts_dict, indent=2)}\n\n"
+            "Return a JSON object with EXACTLY these string keys:\n"
+            '- "summary": Concise executive overview of the case recovery findings.\n'
+            '- "assessment": Holistic assessment of overall recovery health and evidence integrity.\n'
+            '- "structural_context": Graph topology, cluster distributions, and evidence buffer breakdown.\n'
+            '- "limitations": Explicit distinction between physical coverage and candidate volumes, including cap disclosures.\n'
+            '- "recommended_next_steps": Strategic next investigative steps for forensic examiners.\n'
+            '- "details": List of 3 to 5 concise analytical bullet statements.\n'
+        )
 
-            if not assessment or not structural_context or not limitations or not recommended_next_steps:
-                raise ValueError(f"Gemini response missing required interpretive fields: {parsed.keys()}")
-
-            return ProviderInterpretationOutput(
-                summary=summary,
-                assessment=assessment,
-                structural_context=structural_context,
-                limitations=limitations,
-                recommended_next_steps=recommended_next_steps,
-                details=details,
-            )
+        return self._call_gemini(
+            prompt,
+            default_summary=f"Executive forensic briefing for Case '{facts.case_id}'.",
+        )

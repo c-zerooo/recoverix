@@ -80,13 +80,49 @@ class DeterministicClusterFacts(BaseModel):
     evidence_file_id: Optional[str] = None
     cluster_start: int = Field(ge=0)
     cluster_end: Optional[int] = Field(default=None, ge=0)
+
+    # Precise Physical Metrics
+    bounding_span_bytes: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Continuous coordinate envelope: max(end) - min(start). None if any candidate unbounded.",
+    )
+    unique_physical_bytes: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Exact 1D Lebesgue union of bounded candidate intervals. None if any candidate unbounded.",
+    )
+    bounded_physical_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="1D union over bounded candidates only. Always available as lower bound.",
+    )
+    has_unbounded_candidate: bool = Field(
+        default=False,
+        description="True if any candidate in the cluster has evidence_end is None.",
+    )
+
+    # Topological & Hypothesis Classifications
     relationship_classification: AuthoritativeClusterClassification
     has_ambiguity: bool
     total_nodes: int = Field(ge=1)
+    coextensive_candidate_count: int = Field(default=0, ge=0)
+    containment_edge_count: int = Field(default=0, ge=0)
+    overlap_edge_count: int = Field(default=0, ge=0)
+    competing_format_count: int = Field(default=0, ge=0)
+
+    # Membership and Metadata
     member_formats: List[str]
     member_node_ids: List[str]
     max_confidence_score: float = Field(ge=0.0, le=100.0)
     highest_priority: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+
+    # Candidate Hypothesis Volume Accounting
+    candidate_aggregate_verified_bytes: int = Field(default=0, ge=0)
+    candidate_aggregate_reconstructed_bytes: int = Field(default=0, ge=0)
+    candidate_aggregate_missing_bytes: int = Field(default=0, ge=0)
+    status_distribution: Dict[str, int] = Field(default_factory=dict)
+    total_damage_regions: int = Field(default=0, ge=0)
 
 
 class DeterministicCaseFacts(BaseModel):
@@ -99,13 +135,38 @@ class DeterministicCaseFacts(BaseModel):
     total_artifacts: int = Field(ge=0)
     total_nodes: int = Field(ge=0)
     total_clusters: int = Field(ge=0)
-    format_distribution: Dict[str, int]
-    status_distribution: Dict[str, int]
-    priority_distribution: Dict[str, int]
-    cluster_classification_distribution: Dict[str, int]
+
+    # Case Physical Coverage
+    case_physical_coverage_bytes: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Sum of unique physical interval unions across all scoped evidence buffers.",
+    )
+    case_coverage_is_complete: bool = Field(
+        default=True,
+        description="False if any scoped candidate has evidence_end is None.",
+    )
+
+    # Candidate Evaluation Volume Accounting
+    candidate_aggregate_verified_bytes: int = Field(default=0, ge=0)
+    candidate_aggregate_reconstructed_bytes: int = Field(default=0, ge=0)
+    candidate_aggregate_missing_bytes: int = Field(default=0, ge=0)
+
+    # Unscoped Candidates Tracking
+    unscoped_candidate_count: int = Field(default=0, ge=0)
+    unscoped_aggregate_verified_bytes: int = Field(default=0, ge=0)
+
+    # Distributions
+    format_distribution: Dict[str, int] = Field(default_factory=dict)
+    status_distribution: Dict[str, int] = Field(default_factory=dict)
+    priority_distribution: Dict[str, int] = Field(default_factory=dict)
+    cluster_classification_distribution: Dict[str, int] = Field(default_factory=dict)
+
+    # Candidate Cap Enforcement
     candidate_cap_enforced: bool = False
     total_discovered_candidates: int = Field(default=0, ge=0)
     candidates_omitted: int = Field(default=0, ge=0)
+    graph_is_complete: bool = True
 
 
 class ArtifactInterpretationContext(BaseModel):
@@ -127,8 +188,8 @@ class ClusterInterpretationContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     facts: DeterministicClusterFacts
-    nodes: List[DeterministicArtifactFacts]
-    relationships: List[DeterministicRelationshipFact]
+    nodes: List[DeterministicArtifactFacts] = Field(default_factory=list)
+    relationships: List[DeterministicRelationshipFact] = Field(default_factory=list)
 
 
 class CaseInterpretationContext(BaseModel):
@@ -137,6 +198,7 @@ class CaseInterpretationContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     facts: DeterministicCaseFacts
+    cluster_facts: List[DeterministicClusterFacts] = Field(default_factory=list)
 
 
 class ProviderInterpretationOutput(BaseModel):
@@ -220,11 +282,16 @@ class GroundedClusterInterpretation(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     facts: DeterministicClusterFacts
-    relationships: List[DeterministicRelationshipFact]
+    relationships: List[DeterministicRelationshipFact] = Field(default_factory=list)
     interpretation: ProviderInterpretationOutput
     source: Literal["DETERMINISTIC_RULES", "GEMINI_1_5_FLASH"]
     cached: bool = False
     generated_at: str
+    cluster_fingerprint: str
+
+    def with_cached(self, cached: bool) -> GroundedClusterInterpretation:
+        """Return a copy with updated cached flag."""
+        return self.model_copy(update={"cached": cached})
 
 
 class GroundedCaseInterpretation(BaseModel):
@@ -237,3 +304,8 @@ class GroundedCaseInterpretation(BaseModel):
     source: Literal["DETERMINISTIC_RULES", "GEMINI_1_5_FLASH"]
     cached: bool = False
     generated_at: str
+    case_graph_fingerprint: str
+
+    def with_cached(self, cached: bool) -> GroundedCaseInterpretation:
+        """Return a copy with updated cached flag."""
+        return self.model_copy(update={"cached": cached})

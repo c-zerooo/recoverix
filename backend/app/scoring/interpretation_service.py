@@ -12,15 +12,30 @@ import os
 import re
 import json
 import logging
+import hashlib
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from backend.app.models.interpretation import (
     DeterministicArtifactFacts,
+    DeterministicRelationshipFact,
+    DeterministicClusterFacts,
+    DeterministicCaseFacts,
     ArtifactInterpretationContext,
+    ClusterInterpretationContext,
+    CaseInterpretationContext,
     ProviderInterpretationOutput,
     GroundedArtifactInterpretation,
+    GroundedClusterInterpretation,
+    GroundedCaseInterpretation,
     AuthoritativeRecoveryStatus,
+)
+from backend.app.models.evidence_graph import (
+    EvidenceGraph,
+    ArtifactCluster,
+    GraphNode,
+    GraphEdge,
 )
 from backend.app.scoring.providers import (
     InterpretationProvider,
@@ -35,6 +50,143 @@ logger = logging.getLogger(__name__)
 _GLOBAL_SERVICE: Optional[InterpretationService] = None
 
 
+def compute_interval_union_bytes(intervals: List[Tuple[int, int]]) -> int:
+    """Compute the total byte length of the union of half-open intervals [start, end).
+
+    Deterministic, handles adjacent, overlapping, nested, and disjoint intervals.
+    """
+    if not intervals:
+        return 0
+    valid = [iv for iv in intervals if iv[1] > iv[0]]
+    if not valid:
+        return 0
+    sorted_intervals = sorted(valid, key=lambda x: (x[0], x[1]))
+
+    total_bytes = 0
+    cur_start, cur_end = sorted_intervals[0]
+
+    for s, e in sorted_intervals[1:]:
+        if s <= cur_end:
+            # Overlapping or adjacent: extend current interval
+            if e > cur_end:
+                cur_end = e
+        else:
+            # Disjoint gap: commit previous interval and advance
+            total_bytes += (cur_end - cur_start)
+            cur_start, cur_end = s, e
+
+    total_bytes += (cur_end - cur_start)
+    return total_bytes
+
+
+def compute_cluster_fingerprint(cluster: ArtifactCluster, graph: EvidenceGraph) -> str:
+    """Compute a deterministic SHA-256 fingerprint for a spatial cluster in an evidence graph."""
+    c_node_ids = set(cluster.node_ids)
+    member_nodes = sorted(
+        [n for n in graph.nodes if n.node_id in c_node_ids],
+        key=lambda n: n.node_id,
+    )
+    node_tuples = [
+        (
+            n.node_id,
+            n.run_id,
+            n.format,
+            n.status,
+            float(n.confidence_score),
+            int(n.verified_bytes),
+            int(n.reconstructed_bytes),
+            int(n.missing_bytes),
+            n.evidence_start,
+            n.evidence_end,
+            bool(n.is_ambiguous),
+        )
+        for n in member_nodes
+    ]
+
+    internal_edges = sorted(
+        [
+            e
+            for e in graph.edges
+            if e.source_node_id in c_node_ids and e.target_node_id in c_node_ids
+        ],
+        key=lambda e: e.edge_id,
+    )
+    edge_tuples = [
+        (
+            e.edge_id,
+            e.source_node_id,
+            e.target_node_id,
+            e.relationship_type,
+            e.overlap_start,
+            e.overlap_end,
+            int(e.overlap_bytes),
+        )
+        for e in internal_edges
+    ]
+
+    cluster_meta = (
+        cluster.cluster_id,
+        cluster.evidence_file_id,
+        cluster.cluster_start,
+        cluster.cluster_end,
+        cluster.relationship_classification,
+        bool(cluster.has_ambiguity),
+        cluster.total_nodes,
+        sorted(list(cluster.formats)),
+    )
+
+    payload = {
+        "cluster": cluster_meta,
+        "nodes": node_tuples,
+        "edges": edge_tuples,
+    }
+    canonical_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canonical_bytes).hexdigest()[:16]
+
+
+def compute_case_graph_fingerprint(graph: EvidenceGraph) -> str:
+    """Compute a deterministic SHA-256 fingerprint for an entire case evidence graph."""
+    cluster_fps = sorted(
+        [
+            (c.cluster_id, compute_cluster_fingerprint(c, graph))
+            for c in graph.clusters
+        ],
+        key=lambda x: x[0],
+    )
+    buffer_tuples = [
+        (
+            b.evidence_file_id,
+            b.total_nodes,
+            b.total_edges,
+            b.total_clusters,
+            b.total_byte_span,
+            b.candidate_cap_enforced,
+            b.total_discovered_candidates,
+            b.candidates_omitted,
+            b.buffer_is_complete,
+        )
+        for b in sorted(graph.evidence_buffers, key=lambda x: x.evidence_file_id)
+    ]
+    meta_tuple = (
+        graph.metadata.case_id,
+        graph.metadata.total_evidence_buffers,
+        graph.metadata.total_nodes,
+        graph.metadata.total_edges,
+        graph.metadata.total_clusters,
+        graph.metadata.candidate_cap_enforced,
+        graph.metadata.total_discovered_candidates,
+        graph.metadata.candidates_omitted,
+        graph.metadata.graph_is_complete,
+    )
+    payload = {
+        "clusters": cluster_fps,
+        "buffers": buffer_tuples,
+        "meta": meta_tuple,
+    }
+    canonical_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canonical_bytes).hexdigest()[:16]
+
+
 class InterpretationService:
     """Canonical service for grounded evidence interpretation."""
 
@@ -47,6 +199,26 @@ class InterpretationService:
         self._fallback_provider = fallback_provider or DeterministicRuleProvider()
         self._primary_provider = primary_provider or self._resolve_default_primary()
         self._store = store
+        self._cluster_cache: OrderedDict[Tuple[str, str, str], GroundedClusterInterpretation] = OrderedDict()
+        self._case_cache: OrderedDict[Tuple[str, str], GroundedCaseInterpretation] = OrderedDict()
+        self._max_cluster_cache_size = 1000
+        self._max_case_cache_size = 100
+
+    def _put_cluster_cache(
+        self, key: Tuple[str, str, str], value: GroundedClusterInterpretation
+    ) -> None:
+        self._cluster_cache[key] = value
+        self._cluster_cache.move_to_end(key)
+        if len(self._cluster_cache) > self._max_cluster_cache_size:
+            self._cluster_cache.popitem(last=False)
+
+    def _put_case_cache(
+        self, key: Tuple[str, str], value: GroundedCaseInterpretation
+    ) -> None:
+        self._case_cache[key] = value
+        self._case_cache.move_to_end(key)
+        if len(self._case_cache) > self._max_case_cache_size:
+            self._case_cache.popitem(last=False)
 
     def _resolve_default_primary(self) -> InterpretationProvider:
         """Resolve default primary provider based on offline mode and API key."""
@@ -98,8 +270,12 @@ class InterpretationService:
         art_id = str(
             artifact_id
             or getattr(artifact, "artifact_id", None)
+            or getattr(artifact, "node_id", None)
+            or getattr(artifact, "candidate_id", None)
             or getattr(artifact, "file_id", None)
             or d.get("artifact_id")
+            or d.get("node_id")
+            or d.get("candidate_id")
             or d.get("file_id")
             or "unknown_artifact"
         )
@@ -382,6 +558,391 @@ class InterpretationService:
             except Exception:
                 pass
 
+        return interpretation
+
+    @classmethod
+    def extract_cluster_facts(
+        cls, cluster: ArtifactCluster, graph: EvidenceGraph, case_id: str
+    ) -> DeterministicClusterFacts:
+        """Extract immutable deterministic facts for an artifact cluster."""
+        c_node_ids = set(cluster.node_ids)
+        member_nodes = [n for n in graph.nodes if n.node_id in c_node_ids]
+        internal_edges = [
+            e
+            for e in graph.edges
+            if e.source_node_id in c_node_ids and e.target_node_id in c_node_ids
+        ]
+
+        # Intervals & Physical bounds
+        bounded_intervals = [
+            (n.evidence_start, n.evidence_end)
+            for n in member_nodes
+            if n.evidence_end is not None
+        ]
+        has_unbounded = any(n.evidence_end is None for n in member_nodes)
+
+        bounded_bytes = compute_interval_union_bytes(bounded_intervals)
+
+        if has_unbounded:
+            bounding_span = None
+            unique_phys = None
+        else:
+            bounding_span = (
+                (cluster.cluster_end - cluster.cluster_start)
+                if cluster.cluster_end is not None
+                else None
+            )
+            unique_phys = bounded_bytes
+
+        # Hypothesis classifications & counts
+        rel_class = cluster.relationship_classification
+        if rel_class == "COEXTENSIVE_SET":
+            coext_count = len(member_nodes)
+        else:
+            coext_nodes: Set[str] = set()
+            for e in internal_edges:
+                if e.relationship_type == "COEXTENSIVE":
+                    coext_nodes.add(e.source_node_id)
+                    coext_nodes.add(e.target_node_id)
+            coext_count = len(coext_nodes)
+
+        containment_pairs = {
+            frozenset([e.source_node_id, e.target_node_id])
+            for e in internal_edges
+            if e.relationship_type in ("CONTAINS", "CONTAINED_BY")
+        }
+        cont_edges = len(containment_pairs)
+
+        overlap_pairs = {
+            frozenset([e.source_node_id, e.target_node_id])
+            for e in internal_edges
+            if e.relationship_type == "OVERLAPS"
+        }
+        ovlp_edges = len(overlap_pairs)
+
+        if rel_class == "COEXTENSIVE_SET":
+            competing_fmts = len(set(cluster.formats))
+        else:
+            conflict_nodes: Set[str] = set()
+            for e in internal_edges:
+                if e.relationship_type in ("COEXTENSIVE", "OVERLAPS"):
+                    conflict_nodes.add(e.source_node_id)
+                    conflict_nodes.add(e.target_node_id)
+            conflict_fmts = {
+                n.format for n in member_nodes if n.node_id in conflict_nodes
+            }
+            competing_fmts = len(conflict_fmts)
+
+        # Status and Priority Rollup
+        status_dist: Dict[str, int] = {}
+        for n in member_nodes:
+            status_dist[n.status] = status_dist.get(n.status, 0) + 1
+
+        member_art_facts = [cls.extract_artifact_facts(n) for n in member_nodes]
+        priorities = [af.priority for af in member_art_facts]
+
+        priority_order = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+        highest_prio = "LOW"
+        highest_val = 0
+        for p in priorities:
+            val = priority_order.get(p, 1)
+            if val > highest_val:
+                highest_val = val
+                highest_prio = p
+
+        max_conf = max((n.confidence_score for n in member_nodes), default=0.0)
+        total_damage = sum(af.damage_region_count for af in member_art_facts)
+
+        # Candidate aggregate volumes
+        agg_v = sum(n.verified_bytes for n in member_nodes)
+        agg_r = sum(n.reconstructed_bytes for n in member_nodes)
+        agg_m = sum(n.missing_bytes for n in member_nodes)
+
+        return DeterministicClusterFacts(
+            cluster_id=cluster.cluster_id,
+            case_id=case_id,
+            evidence_file_id=cluster.evidence_file_id,
+            cluster_start=cluster.cluster_start,
+            cluster_end=cluster.cluster_end,
+            bounding_span_bytes=bounding_span,
+            unique_physical_bytes=unique_phys,
+            bounded_physical_bytes=bounded_bytes,
+            has_unbounded_candidate=has_unbounded,
+            relationship_classification=rel_class,  # type: ignore[arg-type]
+            has_ambiguity=cluster.has_ambiguity,
+            total_nodes=cluster.total_nodes,
+            coextensive_candidate_count=coext_count,
+            containment_edge_count=cont_edges,
+            overlap_edge_count=ovlp_edges,
+            competing_format_count=competing_fmts,
+            member_formats=sorted(list(set(cluster.formats))),
+            member_node_ids=sorted(list(cluster.node_ids)),
+            max_confidence_score=float(max_conf),
+            highest_priority=highest_prio,  # type: ignore[arg-type]
+            candidate_aggregate_verified_bytes=agg_v,
+            candidate_aggregate_reconstructed_bytes=agg_r,
+            candidate_aggregate_missing_bytes=agg_m,
+            status_distribution=status_dist,
+            total_damage_regions=total_damage,
+        )
+
+    @classmethod
+    def extract_case_facts(
+        cls, graph: EvidenceGraph, case_id: str
+    ) -> DeterministicCaseFacts:
+        """Extract immutable deterministic facts aggregated across an entire case."""
+        total_buffers = len(graph.evidence_buffers)
+        total_artifacts = len(graph.nodes)
+        total_nodes = len(graph.nodes)
+        total_clusters = len(graph.clusters)
+
+        # Buffer-by-buffer physical coverage
+        clusters_by_file: Dict[Optional[str], List[ArtifactCluster]] = {}
+        for c in graph.clusters:
+            clusters_by_file.setdefault(c.evidence_file_id, []).append(c)
+
+        case_phys_cov: Optional[int] = 0
+        case_cov_complete = True
+
+        for ev_file_id, clusters in clusters_by_file.items():
+            if ev_file_id is None:
+                # Unscoped candidates are excluded from physical coverage!
+                continue
+            for c in clusters:
+                c_facts = cls.extract_cluster_facts(c, graph, case_id=case_id)
+                if c_facts.unique_physical_bytes is None:
+                    case_cov_complete = False
+                    case_phys_cov = None
+                elif case_phys_cov is not None:
+                    case_phys_cov += c_facts.unique_physical_bytes
+
+        # Unscoped tracking
+        unscoped_nodes = [n for n in graph.nodes if n.evidence_file_id is None]
+        unscoped_count = len(unscoped_nodes)
+        unscoped_v = sum(n.verified_bytes for n in unscoped_nodes)
+
+        # Candidate aggregate metrics across all nodes
+        agg_v = sum(n.verified_bytes for n in graph.nodes)
+        agg_r = sum(n.reconstructed_bytes for n in graph.nodes)
+        agg_m = sum(n.missing_bytes for n in graph.nodes)
+
+        # Distributions
+        fmt_dist: Dict[str, int] = {}
+        for n in graph.nodes:
+            fmt_dist[n.format] = fmt_dist.get(n.format, 0) + 1
+
+        status_dist: Dict[str, int] = {}
+        for n in graph.nodes:
+            status_dist[n.status] = status_dist.get(n.status, 0) + 1
+
+        member_art_facts = [cls.extract_artifact_facts(n) for n in graph.nodes]
+        priority_dist: Dict[str, int] = {}
+        for af in member_art_facts:
+            priority_dist[af.priority] = priority_dist.get(af.priority, 0) + 1
+
+        cluster_dist: Dict[str, int] = {}
+        for c in graph.clusters:
+            cluster_dist[c.relationship_classification] = (
+                cluster_dist.get(c.relationship_classification, 0) + 1
+            )
+
+        # Metadata
+        cap_enforced = graph.metadata.candidate_cap_enforced
+        disc_candidates = graph.metadata.total_discovered_candidates
+        omitted_candidates = graph.metadata.candidates_omitted
+        complete_graph = graph.metadata.graph_is_complete
+
+        return DeterministicCaseFacts(
+            case_id=case_id,
+            total_evidence_buffers=total_buffers,
+            total_artifacts=total_artifacts,
+            total_nodes=total_nodes,
+            total_clusters=total_clusters,
+            case_physical_coverage_bytes=case_phys_cov,
+            case_coverage_is_complete=case_cov_complete,
+            candidate_aggregate_verified_bytes=agg_v,
+            candidate_aggregate_reconstructed_bytes=agg_r,
+            candidate_aggregate_missing_bytes=agg_m,
+            unscoped_candidate_count=unscoped_count,
+            unscoped_aggregate_verified_bytes=unscoped_v,
+            format_distribution=fmt_dist,
+            status_distribution=status_dist,
+            priority_distribution=priority_dist,
+            cluster_classification_distribution=cluster_dist,
+            candidate_cap_enforced=cap_enforced,
+            total_discovered_candidates=disc_candidates,
+            candidates_omitted=omitted_candidates,
+            graph_is_complete=complete_graph,
+        )
+
+    def _invoke_cluster_with_fallback(
+        self, context: ClusterInterpretationContext
+    ) -> Tuple[ProviderInterpretationOutput, str]:
+        """Invoke primary provider for cluster with silent deterministic fallback on failure."""
+        offline = os.getenv("RECOVERIX_OFFLINE", "0").lower() in ("1", "true", "yes")
+
+        if not offline and self._primary_provider is not self._fallback_provider:
+            try:
+                output = self._primary_provider.interpret_cluster(context)
+                return output, "GEMINI_1_5_FLASH"
+            except Exception as e:
+                logger.warning(
+                    f"Primary external AI provider call for cluster failed or timed out: {e}. "
+                    "Falling back seamlessly to DeterministicRuleProvider."
+                )
+
+        output = self._fallback_provider.interpret_cluster(context)
+        return output, "DETERMINISTIC_RULES"
+
+    def _invoke_case_with_fallback(
+        self, context: CaseInterpretationContext
+    ) -> Tuple[ProviderInterpretationOutput, str]:
+        """Invoke primary provider for case with silent deterministic fallback on failure."""
+        offline = os.getenv("RECOVERIX_OFFLINE", "0").lower() in ("1", "true", "yes")
+
+        if not offline and self._primary_provider is not self._fallback_provider:
+            try:
+                output = self._primary_provider.interpret_case(context)
+                return output, "GEMINI_1_5_FLASH"
+            except Exception as e:
+                logger.warning(
+                    f"Primary external AI provider call for case failed or timed out: {e}. "
+                    "Falling back seamlessly to DeterministicRuleProvider."
+                )
+
+        output = self._fallback_provider.interpret_case(context)
+        return output, "DETERMINISTIC_RULES"
+
+    def interpret_cluster(
+        self,
+        case_id: str,
+        cluster_id: str,
+        graph: Optional[EvidenceGraph] = None,
+        force_refresh: bool = False,
+    ) -> GroundedClusterInterpretation:
+        """Interpret a spatial cluster with fingerprint caching and safe fallback."""
+        if graph is None:
+            from backend.app.recovery.graph import build_case_evidence_graph
+            store_to_use = self._store
+            if store_to_use is None:
+                from backend.app.store import store as default_store
+                store_to_use = default_store
+            graph = build_case_evidence_graph(case_id=case_id, store=store_to_use)
+
+        cluster = next((c for c in graph.clusters if c.cluster_id == cluster_id), None)
+        if cluster is None:
+            raise KeyError(f"Cluster '{cluster_id}' not found in case '{case_id}'")
+
+        cluster_fp = compute_cluster_fingerprint(cluster, graph)
+        cache_key = (case_id, cluster_id, cluster_fp)
+
+        # 1. Check cache if not force_refresh
+        if not force_refresh and cache_key in self._cluster_cache:
+            self._cluster_cache.move_to_end(cache_key)
+            return self._cluster_cache[cache_key].with_cached(True)
+
+        # 2. Extract facts
+        facts = self.extract_cluster_facts(cluster, graph, case_id=case_id)
+
+        # 3. Context
+        c_node_ids = set(cluster.node_ids)
+        member_nodes = [n for n in graph.nodes if n.node_id in c_node_ids]
+        node_facts = [self.extract_artifact_facts(n) for n in member_nodes]
+
+        internal_edges = [
+            e
+            for e in graph.edges
+            if e.source_node_id in c_node_ids and e.target_node_id in c_node_ids
+        ]
+        rel_facts = [
+            DeterministicRelationshipFact(
+                edge_id=e.edge_id,
+                source_node_id=e.source_node_id,
+                target_node_id=e.target_node_id,
+                relationship_type=e.relationship_type,  # type: ignore[arg-type]
+                evidence_file_id=e.evidence_file_id,
+                evidence_basis=e.evidence_basis,
+                overlap_start=e.overlap_start,
+                overlap_end=e.overlap_end,
+                overlap_bytes=e.overlap_bytes,
+            )
+            for e in internal_edges
+        ]
+
+        context = ClusterInterpretationContext(
+            facts=facts,
+            nodes=node_facts,
+            relationships=rel_facts,
+        )
+
+        # 4. Invoke provider with fallback
+        output, source = self._invoke_cluster_with_fallback(context)
+
+        # 5. Build model
+        interpretation = GroundedClusterInterpretation(
+            facts=facts,
+            relationships=rel_facts,
+            interpretation=output,
+            source=source,  # type: ignore[arg-type]
+            cached=False,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            cluster_fingerprint=cluster_fp,
+        )
+
+        # 6. Put in cache
+        self._put_cluster_cache(cache_key, interpretation)
+        return interpretation
+
+    def interpret_case(
+        self,
+        case_id: str,
+        graph: Optional[EvidenceGraph] = None,
+        force_refresh: bool = False,
+    ) -> GroundedCaseInterpretation:
+        """Interpret an entire case with graph fingerprint caching and safe fallback."""
+        if graph is None:
+            from backend.app.recovery.graph import build_case_evidence_graph
+            store_to_use = self._store
+            if store_to_use is None:
+                from backend.app.store import store as default_store
+                store_to_use = default_store
+            graph = build_case_evidence_graph(case_id=case_id, store=store_to_use)
+
+        case_fp = compute_case_graph_fingerprint(graph)
+        cache_key = (case_id, case_fp)
+
+        # 1. Check cache if not force_refresh
+        if not force_refresh and cache_key in self._case_cache:
+            self._case_cache.move_to_end(cache_key)
+            return self._case_cache[cache_key].with_cached(True)
+
+        # 2. Extract facts
+        facts = self.extract_case_facts(graph, case_id=case_id)
+        cluster_facts = [
+            self.extract_cluster_facts(c, graph, case_id=case_id)
+            for c in graph.clusters
+        ]
+
+        context = CaseInterpretationContext(
+            facts=facts,
+            cluster_facts=cluster_facts,
+        )
+
+        # 3. Invoke provider with fallback
+        output, source = self._invoke_case_with_fallback(context)
+
+        # 4. Build model
+        interpretation = GroundedCaseInterpretation(
+            facts=facts,
+            interpretation=output,
+            source=source,  # type: ignore[arg-type]
+            cached=False,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            case_graph_fingerprint=case_fp,
+        )
+
+        # 5. Put in cache
+        self._put_case_cache(cache_key, interpretation)
         return interpretation
 
 
