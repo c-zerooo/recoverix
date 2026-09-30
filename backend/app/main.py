@@ -13,6 +13,7 @@ from backend.app.api.analysis import router as analysis_router
 from backend.app.api.artifacts import router as artifacts_router
 from backend.app.api.file_recovery import router as file_recovery_router
 from backend.app.api.recovery_runs import router as recovery_runs_router
+from backend.app.api.evidence_graph import router as evidence_graph_router
 from backend.app.store import store
 
 
@@ -44,6 +45,7 @@ app.include_router(analysis_router, prefix="/api")
 app.include_router(artifacts_router, prefix="/api")
 app.include_router(file_recovery_router, prefix="/api")
 app.include_router(recovery_runs_router, prefix="/api")
+app.include_router(evidence_graph_router, prefix="/api")
 
 
 @app.get("/health", tags=["health"])
