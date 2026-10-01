@@ -110,3 +110,164 @@ def test_05_health_check_and_existing_app_unaffected(client: TestClient):
     res = client.get("/health")
     assert res.status_code == 200
     assert res.json() == {"status": "ok", "service": "recoverix-api"}
+
+
+def _make_test_artifact(
+    artifact_id: str, case_id: str, ai_summary: str | None = None
+) -> ArtifactResponse:
+    from backend.app.models.artifact import (
+        ArtifactResponse,
+        ConfidenceBreakdownSchema,
+        ArtifactProvenanceSchema,
+    )
+
+    return ArtifactResponse(
+        artifact_id=artifact_id,
+        case_id=case_id,
+        format="txt",
+        size_bytes=500,
+        confidence_score=95,
+        score_breakdown=ConfidenceBreakdownSchema(
+            header_validity=20,
+            footer_validity=20,
+            structural_validation=25,
+            size_plausibility=15,
+            reconstruction_integrity=15,
+            total=95,
+        ),
+        status="FULLY_RECOVERED",
+        provenance=ArtifactProvenanceSchema(
+            verified_bytes=500,
+            reconstructed_bytes=0,
+            missing_bytes=0,
+            reconstruction_method="CONTIGUOUS",
+            validation_status="PASSED",
+        ),
+        category="DOCUMENT",
+        priority="HIGH",
+        ai_summary=ai_summary,
+        content_preview="Forensic test artifact content preview",
+        metadata={},
+    )
+
+
+def test_06_artifact_get_has_no_interpretation_side_effect(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """TEST A: GET /api/artifacts/{id} must not generate interpretation or write SQLite."""
+    from backend.app.store import store
+    from backend.app.scoring.interpretation_service import InterpretationService
+
+    def forbid_explain(*args, **kwargs):
+        raise AssertionError("explain_artifact must NOT be called during GET /api/artifacts/{id}")
+
+    def forbid_interpret(*args, **kwargs):
+        raise AssertionError("interpret_artifact must NOT be called during GET /api/artifacts/{id}")
+
+    monkeypatch.setattr("backend.app.api.artifacts.explain_artifact", forbid_explain)
+    monkeypatch.setattr(InterpretationService, "interpret_artifact", forbid_interpret)
+
+    case = store.create_case("GET Side Effect Test Case A")
+    art = _make_test_artifact("art_side_effect_01", case.case_id, ai_summary=None)
+    store.add_artifact(art)
+
+    # Initial state in DB
+    db_art_before = store.get_artifact("art_side_effect_01")
+    assert db_art_before is not None
+    assert db_art_before.ai_summary is None
+
+    # Call GET endpoint
+    res = client.get("/api/artifacts/art_side_effect_01")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["artifact_id"] == "art_side_effect_01"
+    assert data["ai_summary"] is None
+
+    # Database state must remain unchanged
+    db_art_after = store.get_artifact("art_side_effect_01")
+    assert db_art_after is not None
+    assert db_art_after.ai_summary is None
+
+
+def test_07_case_artifacts_get_has_no_interpretation_side_effect(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """TEST B: GET /api/cases/{case_id}/artifacts must not generate interpretation or write SQLite."""
+    from backend.app.store import store
+    from backend.app.scoring.interpretation_service import InterpretationService
+
+    def forbid_explain(*args, **kwargs):
+        raise AssertionError("explain_artifact must NOT be called during GET /api/cases/{case_id}/artifacts")
+
+    def forbid_interpret(*args, **kwargs):
+        raise AssertionError("interpret_artifact must NOT be called during GET /api/cases/{case_id}/artifacts")
+
+    monkeypatch.setattr("backend.app.api.artifacts.explain_artifact", forbid_explain)
+    monkeypatch.setattr(InterpretationService, "interpret_artifact", forbid_interpret)
+
+    case = store.create_case("GET Side Effect Test Case B")
+    art = _make_test_artifact("art_side_effect_02", case.case_id, ai_summary=None)
+    store.add_artifact(art)
+
+    res = client.get(f"/api/cases/{case.case_id}/artifacts")
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data) >= 1
+    target = next((a for a in data if a["artifact_id"] == "art_side_effect_02"), None)
+    assert target is not None
+    assert target["ai_summary"] is None
+
+    # Database state must remain unchanged
+    db_art = store.get_artifact("art_side_effect_02")
+    assert db_art is not None
+    assert db_art.ai_summary is None
+
+
+def test_08_persisted_interpretation_is_only_read_on_get(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """TEST C: Existing persisted interpretation is returned as-is without regeneration."""
+    import json
+    from backend.app.store import store
+    from backend.app.scoring.interpretation_service import InterpretationService
+
+    def forbid_explain(*args, **kwargs):
+        raise AssertionError("explain_artifact must NOT be called when reading persisted interpretation")
+
+    def forbid_interpret(*args, **kwargs):
+        raise AssertionError("interpret_artifact must NOT be called when reading persisted interpretation")
+
+    monkeypatch.setattr("backend.app.api.artifacts.explain_artifact", forbid_explain)
+    monkeypatch.setattr(InterpretationService, "interpret_artifact", forbid_interpret)
+
+    persisted_summary = json.dumps({
+        "summary": "Existing persisted forensic summary",
+        "details": ["Pre-existing observation 1"],
+        "cached": True,
+    })
+
+    case = store.create_case("GET Persisted Read Test Case C")
+    art = _make_test_artifact("art_side_effect_03", case.case_id, ai_summary=persisted_summary)
+    store.add_artifact(art)
+
+    res = client.get("/api/artifacts/art_side_effect_03")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ai_summary"] == persisted_summary
+
+    # Database state must remain exactly identical
+    db_art = store.get_artifact("art_side_effect_03")
+    assert db_art is not None
+    assert db_art.ai_summary == persisted_summary
+
+
+def test_09_legacy_explicit_explain_remains_functional(client: TestClient):
+    """TEST D: Legacy POST /api/artifacts/{id}/explain remains fully operational."""
+    from backend.app.store import store
+
+    case = store.create_case("Legacy Explain Test Case D")
+    art = _make_test_artifact("art_legacy_explain_01", case.case_id, ai_summary=None)
+    store.add_artifact(art)
+
+    res = client.post("/api/artifacts/art_legacy_explain_01/explain")
+    assert res.status_code == 200
+    data = res.json()
+    assert "summary" in data
+    assert "details" in data
+    assert "priority" in data
+    assert "facts" in data
+    assert data.get("available") is True

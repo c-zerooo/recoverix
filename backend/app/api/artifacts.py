@@ -37,10 +37,7 @@ def _enrich_artifact(artifact: ArtifactResponse) -> ArtifactResponse:
         enriched.category = classify_artifact(enriched.format, enriched.content_preview)
     if enriched.priority is None:
         enriched.priority = determine_priority(enriched.category, enriched.content_preview, enriched.status)
-    if enriched.ai_summary is None:
-        explanation = explain_artifact(enriched.artifact_id, enriched)
-        enriched.ai_summary = json.dumps(explanation)
-        
+
     return enriched
 
 
