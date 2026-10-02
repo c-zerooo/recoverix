@@ -104,8 +104,8 @@ export default function ArtifactPage({ params }: { params: Promise<{ id: string 
             <ValidationResults artifact={artifact} />
           </div>
           <div className="space-y-8">
-            {/* AI Brief */}
-            <AIEvidenceBrief artifact={artifact} initialBrief={artifact.ai_summary} />
+            {/* AI Interpretation */}
+            <AIEvidenceBrief artifact={artifact} />
             
             {/* Recovered Byte Preview */}
             <div className="bg-white border border-slate-200/90 rounded-xl p-6 shadow-xs">
