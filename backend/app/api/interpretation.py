@@ -8,6 +8,8 @@ Actual execution and retrieval behaviors are implemented in subsequent phases.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -16,6 +18,10 @@ from backend.app.models.interpretation import (
     GroundedClusterInterpretation,
     GroundedCaseInterpretation,
 )
+from backend.app.store import store
+from backend.app.scoring.interpretation_service import get_interpretation_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["interpretation"])
 
@@ -31,10 +37,36 @@ def get_artifact_interpretation(artifact_id: str) -> GroundedArtifactInterpretat
 
     Strictly read-only: does not generate interpretation, invoke LLMs, or mutate storage.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Artifact interpretation retrieval will be implemented in Phase 3.5.3.3",
-    )
+    artifact = store.get_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact '{artifact_id}' not found",
+        )
+
+    if not artifact.ai_summary:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Interpretation not generated for artifact '{artifact_id}'. Call POST to generate.",
+        )
+
+    try:
+        data = (
+            json.loads(artifact.ai_summary)
+            if isinstance(artifact.ai_summary, str)
+            else artifact.ai_summary
+        )
+        if not isinstance(data, dict):
+            raise ValueError("Persisted ai_summary is not a valid JSON dictionary")
+        return GroundedArtifactInterpretation.model_validate(data).with_cached(True)
+    except Exception:
+        logger.error(
+            f"Persisted interpretation for artifact '{artifact_id}' is malformed or invalid"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Persisted interpretation for artifact '{artifact_id}' is malformed or invalid",
+        )
 
 
 @router.post(
@@ -51,10 +83,44 @@ def generate_artifact_interpretation(
     ),
 ) -> GroundedArtifactInterpretation:
     """Generate or refresh grounded evidence interpretation for an artifact."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Artifact interpretation generation will be implemented in Phase 3.5.3.3",
-    )
+    artifact = store.get_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact '{artifact_id}' not found",
+        )
+
+    # When force_refresh=False and a valid persisted interpretation exists, reuse it without regenerating
+    if not force_refresh and artifact.ai_summary:
+        try:
+            data = (
+                json.loads(artifact.ai_summary)
+                if isinstance(artifact.ai_summary, str)
+                else artifact.ai_summary
+            )
+            if isinstance(data, dict):
+                return GroundedArtifactInterpretation.model_validate(data).with_cached(True)
+        except Exception:
+            # If persisted data is malformed and force_refresh is False,
+            # fall through to generate a valid interpretation
+            pass
+
+    try:
+        service = get_interpretation_service(store)
+        service._store = store
+        return service.interpret_artifact(
+            artifact_id=artifact_id,
+            artifact=artifact,
+            force_refresh=True,  # explicitly generate fresh interpretation
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate interpretation for artifact '{artifact_id}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate interpretation for artifact '{artifact_id}'",
+        )
 
 
 @router.get(
