@@ -75,16 +75,17 @@ def test_03_route_response_models():
                 assert route.response_model is GroundedCaseInterpretation
 
 
-def test_04_placeholder_endpoints_return_501(client: TestClient):
-    """Verify that remaining case placeholder endpoints return 501 Not Implemented."""
-    # Case routes (Phase 3.5.3.5)
-    res_get_case = client.get("/api/cases/case_test_01/interpretation")
-    assert res_get_case.status_code == 501
-    assert "3.5.3.5" in res_get_case.json()["detail"]
-
-    res_post_case = client.post("/api/cases/case_test_01/interpretation")
-    assert res_post_case.status_code == 501
-    assert "3.5.3.5" in res_post_case.json()["detail"]
+def test_04_no_remaining_placeholder_endpoints(client: TestClient):
+    """Verify that all 6 interpretation endpoints are now fully implemented and none return 501."""
+    # Artifact routes
+    assert client.get("/api/artifacts/nonexistent_id/interpretation").status_code == 404
+    assert client.post("/api/artifacts/nonexistent_id/interpretation").status_code == 404
+    # Cluster routes
+    assert client.get("/api/cases/nonexistent_case/clusters/c1/interpretation").status_code == 404
+    assert client.post("/api/cases/nonexistent_case/clusters/c1/interpretation").status_code == 404
+    # Case routes
+    assert client.get("/api/cases/nonexistent_case/interpretation").status_code == 404
+    assert client.post("/api/cases/nonexistent_case/interpretation").status_code == 404
 
 
 def test_05_health_check_and_existing_app_unaffected(client: TestClient):
@@ -1223,3 +1224,356 @@ def test_27_malformed_cached_cluster_interpretation_returns_controlled_500(
     res_dict = client.get(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
     assert res_dict.status_code == 500
     assert res_dict.json()["detail"] == f"Cached interpretation for cluster '{cluster.cluster_id}' is malformed or invalid"
+
+
+def test_28_case_interpretation_get_missing_case_returns_404(client: TestClient):
+    """TEST 28: GET case interpretation with non-existent case returns 404."""
+    res = client.get("/api/cases/non_existent_case_28/interpretation")
+    assert res.status_code == 404
+    assert "Case 'non_existent_case_28' not found" in res.json()["detail"]
+
+
+def test_29_case_interpretation_get_uninterpreted_returns_404_no_side_effects(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 29: GET case interpretation when uninterpreted returns 404 without side effects.
+
+    Verifies strict read-only semantics:
+    - Status is 404.
+    - Zero provider/LLM invocations.
+    - Zero interpretation cache mutations.
+    - Zero database mutations.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_case_graph_fingerprint,
+        InterpretationService,
+    )
+
+    case = store.create_case("M353.5 Test 29 Case")
+    run = _make_test_recovery_run("run_test_29", case.case_id, evidence_start=0, evidence_end=200)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    case_fp = compute_case_graph_fingerprint(graph)
+    service = get_interpretation_service(store)
+    cache_key = (case.case_id, case_fp)
+
+    # Ensure cache is clean for this case
+    if cache_key in service._case_cache:
+        del service._case_cache[cache_key]
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked on read-only GET!")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_case_with_fallback", forbid_provider)
+
+    res = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 404
+    assert res.json()["detail"] == f"Interpretation not generated for case '{case.case_id}'. Call POST to generate."
+
+    # Cache must still be empty
+    assert cache_key not in service._case_cache
+
+
+def test_30_case_interpretation_get_existing_cached_returns_200(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 30: GET case interpretation returns existing cached entry with cached=True."""
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_case_graph_fingerprint,
+        InterpretationService,
+    )
+
+    case = store.create_case("M353.5 Test 30 Case")
+    run = _make_test_recovery_run("run_test_30", case.case_id, evidence_start=0, evidence_end=300)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    service = get_interpretation_service(store)
+    case_fp = compute_case_graph_fingerprint(graph)
+    cache_key = (case.case_id, case_fp)
+
+    # Generate interpretation via POST first
+    res_post = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_post.status_code == 200
+    assert res_post.json()["cached"] is False
+    assert cache_key in service._case_cache
+
+    # Now verify GET returns cached entry without invoking provider
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked when serving cached interpretation on GET!")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_case_with_fallback", forbid_provider)
+
+    res_get = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res_get.status_code == 200
+    data = res_get.json()
+    assert data["cached"] is True
+    assert data["case_graph_fingerprint"] == case_fp
+    assert data["facts"]["case_id"] == case.case_id
+    assert "summary" in data["interpretation"]
+    assert "assessment" in data["interpretation"]
+
+
+def test_31_case_interpretation_post_generates_fresh(client: TestClient):
+    """TEST 31: POST case interpretation generates fresh interpretation when not cached."""
+    from backend.app.store import store
+    from backend.app.scoring.interpretation_service import get_interpretation_service
+
+    case = store.create_case("M353.5 Test 31 Case")
+    run = _make_test_recovery_run("run_test_31", case.case_id, evidence_start=0, evidence_end=400)
+    store.add_recovery_run(run)
+
+    service = get_interpretation_service(store)
+
+    res = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 200
+    data = res.json()
+
+    # Validate response structure
+    assert data["cached"] is False
+    assert data["source"] in ("DETERMINISTIC_RULES", "GEMINI_1_5_FLASH")
+    assert data["facts"]["case_id"] == case.case_id
+    assert data["facts"]["total_artifacts"] == 1
+    assert data["facts"]["total_clusters"] == 1
+    assert data["facts"]["total_evidence_buffers"] == 1
+    assert "summary" in data["interpretation"]
+    assert "assessment" in data["interpretation"]
+
+    # Verify cached in memory
+    fp = data["case_graph_fingerprint"]
+    assert (case.case_id, fp) in service._case_cache
+
+
+def test_32_case_interpretation_post_cached_hit_returns_cached_true(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 32: POST case interpretation with force_refresh=False returns cached entry (cached=True)."""
+    from backend.app.store import store
+    from backend.app.scoring.interpretation_service import InterpretationService
+
+    case = store.create_case("M353.5 Test 32 Case")
+    run = _make_test_recovery_run("run_test_32", case.case_id, evidence_start=0, evidence_end=250)
+    store.add_recovery_run(run)
+
+    # Initial POST: generates fresh
+    res_1 = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_1.status_code == 200
+    assert res_1.json()["cached"] is False
+    created_at = res_1.json()["generated_at"]
+
+    # Forbid provider on second POST
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be called on POST cache hit!")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_case_with_fallback", forbid_provider)
+
+    # Second POST without force_refresh
+    res_2 = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_2.status_code == 200
+    data_2 = res_2.json()
+    assert data_2["cached"] is True
+    assert data_2["generated_at"] == created_at
+
+
+def test_33_case_interpretation_post_force_refresh_regenerates(client: TestClient):
+    """TEST 33: POST case interpretation with force_refresh=True regenerates and sets cached=False."""
+    from backend.app.store import store
+
+    case = store.create_case("M353.5 Test 33 Case")
+    run = _make_test_recovery_run("run_test_33", case.case_id, evidence_start=0, evidence_end=350)
+    store.add_recovery_run(run)
+
+    res_1 = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_1.status_code == 200
+    assert res_1.json()["cached"] is False
+
+    # Force refresh
+    res_2 = client.post(f"/api/cases/{case.case_id}/interpretation?force_refresh=true")
+    assert res_2.status_code == 200
+    assert res_2.json()["cached"] is False
+
+
+def test_34_case_graph_fingerprint_identity(client: TestClient):
+    """TEST 34: Case graph fingerprint changes when underlying evidence changes."""
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import compute_case_graph_fingerprint
+
+    case = store.create_case("M353.5 Test 34 Case")
+    run_1 = _make_test_recovery_run(
+        "run_fp_34_1", case.case_id, evidence_start=0, evidence_end=500, verified_bytes=500
+    )
+    store.add_recovery_run(run_1)
+
+    graph_v1 = build_case_evidence_graph(case.case_id, store=store)
+    fp_v1 = compute_case_graph_fingerprint(graph_v1)
+
+    # Generate interpretation for v1
+    res_post_v1 = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_post_v1.status_code == 200
+    assert res_post_v1.json()["case_graph_fingerprint"] == fp_v1
+    assert res_post_v1.json()["cached"] is False
+
+    # Verify GET returns 200 for v1
+    res_get_v1 = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res_get_v1.status_code == 200
+    assert res_get_v1.json()["cached"] is True
+
+    # Now add a second run to alter the case graph
+    run_2 = _make_test_recovery_run(
+        "run_fp_34_2", case.case_id, evidence_start=600, evidence_end=900, verified_bytes=300
+    )
+    store.add_recovery_run(run_2)
+
+    graph_v2 = build_case_evidence_graph(case.case_id, store=store)
+    fp_v2 = compute_case_graph_fingerprint(graph_v2)
+    assert fp_v1 != fp_v2, "Case graph fingerprint must change when evidence changes"
+
+    # GET must now return 404 because cache has no entry for (case_id, fp_v2)
+    res_get_v2 = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res_get_v2.status_code == 404
+    assert "Call POST to generate" in res_get_v2.json()["detail"]
+
+    # POST generates under new fingerprint
+    res_post_v2 = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res_post_v2.status_code == 200
+    assert res_post_v2.json()["case_graph_fingerprint"] == fp_v2
+    assert res_post_v2.json()["cached"] is False
+
+
+def test_35_case_physical_evidence_accounting_no_double_counting(client: TestClient):
+    """TEST 35: Physical evidence accounting: physical coverage != aggregate candidate volume.
+
+    Verifies overlapping candidate spans are not double-counted in case physical coverage.
+    """
+    from backend.app.store import store
+
+    case = store.create_case("M353.5 Test 35 Case")
+    # Candidate 1: [100, 600] (500 verified bytes)
+    run_1 = _make_test_recovery_run(
+        "run_35_1", case.case_id, evidence_file_id="ev_buf_1", evidence_start=100, evidence_end=600, verified_bytes=500
+    )
+    # Candidate 2: [300, 900] (600 verified bytes) - overlaps [300, 600]
+    run_2 = _make_test_recovery_run(
+        "run_35_2", case.case_id, evidence_file_id="ev_buf_1", evidence_start=300, evidence_end=900, verified_bytes=600
+    )
+    store.add_recovery_run(run_1)
+    store.add_recovery_run(run_2)
+
+    res = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 200
+    facts = res.json()["facts"]
+
+    # Aggregate candidate volume: 500 + 600 = 1100
+    assert facts["candidate_aggregate_verified_bytes"] == 1100
+    # Unique physical span: [100, 900] = 800
+    assert facts["case_physical_coverage_bytes"] == 800
+    # Crucial assertion: physical coverage is strictly less than candidate volume
+    assert facts["case_physical_coverage_bytes"] < facts["candidate_aggregate_verified_bytes"]
+
+
+def test_36_case_multiple_evidence_files_independent_coordinate_spaces(client: TestClient):
+    """TEST 36: Multiple evidence files have independent coordinate spaces and are not merged."""
+    from backend.app.store import store
+
+    case = store.create_case("M353.5 Test 36 Case")
+    # Candidate on file A: [0, 500] (500 bytes)
+    run_a = _make_test_recovery_run(
+        "run_36_a", case.case_id, evidence_file_id="ev_file_alpha", evidence_start=0, evidence_end=500, verified_bytes=500
+    )
+    # Candidate on file B: [0, 500] (500 bytes) - identical span coordinates, but distinct file!
+    run_b = _make_test_recovery_run(
+        "run_36_b", case.case_id, evidence_file_id="ev_file_beta", evidence_start=0, evidence_end=500, verified_bytes=500
+    )
+    store.add_recovery_run(run_a)
+    store.add_recovery_run(run_b)
+
+    res = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 200
+    facts = res.json()["facts"]
+
+    assert facts["total_evidence_buffers"] == 2
+    # Physical coverage across independent files is 500 + 500 = 1000, not merged/collapsed to 500
+    assert facts["case_physical_coverage_bytes"] == 1000
+    assert facts["candidate_aggregate_verified_bytes"] == 1000
+
+
+def test_37_case_unknown_scope_candidates_remain_isolated_and_tracked(client: TestClient):
+    """TEST 37: Unknown-scope candidates remain isolated singletons and are tracked in facts."""
+    from backend.app.store import store
+
+    case = store.create_case("M353.5 Test 37 Case")
+    # Scoped candidate on file A: [0, 500] (500 bytes)
+    run_scoped = _make_test_recovery_run(
+        "run_37_scoped", case.case_id, evidence_file_id="ev_file_scoped", evidence_start=0, evidence_end=500, verified_bytes=500
+    )
+    # Unscoped candidate: no file, no offsets, whole-buffer fallback
+    run_unscoped = _make_test_recovery_run(
+        "run_37_unscoped",
+        case.case_id,
+        evidence_file_id=None,
+        evidence_start=0,
+        evidence_end=None,
+        verified_bytes=350,
+        detection_method="raw_carver",
+    )
+    store.add_recovery_run(run_scoped)
+    store.add_recovery_run(run_unscoped)
+
+    res = client.post(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 200
+    facts = res.json()["facts"]
+
+    assert facts["unscoped_candidate_count"] == 1
+    assert facts["unscoped_aggregate_verified_bytes"] == 350
+    # Unscoped candidates are excluded from physical buffer coverage
+    assert facts["case_physical_coverage_bytes"] == 500
+    # But are counted in aggregate verified bytes
+    assert facts["candidate_aggregate_verified_bytes"] == 850
+
+
+def test_38_malformed_cached_case_interpretation_returns_controlled_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 38: Malformed cached case interpretation returns controlled 500 without provider invocation."""
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_case_graph_fingerprint,
+        InterpretationService,
+    )
+
+    case = store.create_case("M353.5 Test 38 Case")
+    run = _make_test_recovery_run("run_test_38", case.case_id, evidence_start=0, evidence_end=150)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    service = get_interpretation_service(store)
+    case_fp = compute_case_graph_fingerprint(graph)
+    cache_key = (case.case_id, case_fp)
+
+    # Inject malformed data into cache
+    service._case_cache[cache_key] = "NOT_A_VALID_INTERPRETATION_JSON{{{"
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked when reading malformed cache on GET")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_case_with_fallback", forbid_provider)
+
+    res = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res.status_code == 500
+    assert res.json()["detail"] == f"Cached interpretation for case '{case.case_id}' is malformed or invalid"
+
+    # Inject schema-violating dict
+    service._case_cache[cache_key] = {"unexpected_key": 999}
+    res_dict = client.get(f"/api/cases/{case.case_id}/interpretation")
+    assert res_dict.status_code == 500
+    assert res_dict.json()["detail"] == f"Cached interpretation for case '{case.case_id}' is malformed or invalid"

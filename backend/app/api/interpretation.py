@@ -23,6 +23,7 @@ from backend.app.recovery.graph import build_case_evidence_graph
 from backend.app.scoring.interpretation_service import (
     get_interpretation_service,
     compute_cluster_fingerprint,
+    compute_case_graph_fingerprint,
 )
 
 logger = logging.getLogger(__name__)
@@ -300,16 +301,64 @@ def generate_cluster_interpretation(
     response_model=GroundedCaseInterpretation,
     status_code=status.HTTP_200_OK,
     summary="Get grounded case synthesis",
+    responses={
+        404: {"description": "Case or interpretation not found"},
+        500: {"description": "Cached interpretation malformed"},
+    },
 )
 def get_case_interpretation(case_id: str) -> GroundedCaseInterpretation:
     """Retrieve cached grounded forensic briefing and synthesis for a case.
 
     Strictly read-only: does not generate interpretation, invoke LLMs, or mutate cache.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Case interpretation retrieval will be implemented in Phase 3.5.3.5",
-    )
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    try:
+        graph = build_case_evidence_graph(case_id=case_id, store=store)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    service = get_interpretation_service(store)
+    service._store = store
+
+    case_fp = compute_case_graph_fingerprint(graph)
+    cache_key = (case_id, case_fp)
+
+    if cache_key not in service._case_cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Interpretation not generated for case '{case_id}'. Call POST to generate.",
+        )
+
+    cached_val = service._case_cache[cache_key]
+    try:
+        if isinstance(cached_val, GroundedCaseInterpretation):
+            return cached_val.with_cached(True)
+        elif isinstance(cached_val, dict):
+            return GroundedCaseInterpretation.model_validate(cached_val).with_cached(True)
+        elif isinstance(cached_val, str):
+            data = json.loads(cached_val)
+            if not isinstance(data, dict):
+                raise ValueError("Cached interpretation is not a valid JSON dictionary")
+            return GroundedCaseInterpretation.model_validate(data).with_cached(True)
+        else:
+            raise ValueError(f"Unexpected cached value type: {type(cached_val)}")
+    except Exception:
+        logger.error(
+            f"Cached interpretation for case '{case_id}' is malformed or invalid"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Cached interpretation for case '{case_id}' is malformed or invalid",
+        )
 
 
 @router.post(
@@ -317,6 +366,10 @@ def get_case_interpretation(case_id: str) -> GroundedCaseInterpretation:
     response_model=GroundedCaseInterpretation,
     status_code=status.HTTP_200_OK,
     summary="Generate or refresh grounded case synthesis",
+    responses={
+        404: {"description": "Case not found"},
+        500: {"description": "Interpretation generation failed"},
+    },
 )
 def generate_case_interpretation(
     case_id: str,
@@ -326,7 +379,67 @@ def generate_case_interpretation(
     ),
 ) -> GroundedCaseInterpretation:
     """Generate or refresh grounded forensic briefing and synthesis for a case."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Case interpretation generation will be implemented in Phase 3.5.3.5",
-    )
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    try:
+        graph = build_case_evidence_graph(case_id=case_id, store=store)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    service = get_interpretation_service(store)
+    service._store = store
+
+    case_fp = compute_case_graph_fingerprint(graph)
+    cache_key = (case_id, case_fp)
+
+    # When force_refresh=False and valid cached interpretation exists, return it directly
+    if not force_refresh and cache_key in service._case_cache:
+        cached_val = service._case_cache[cache_key]
+        try:
+            if isinstance(cached_val, GroundedCaseInterpretation):
+                service._case_cache.move_to_end(cache_key)
+                return cached_val.with_cached(True)
+            elif isinstance(cached_val, dict):
+                interp = GroundedCaseInterpretation.model_validate(cached_val).with_cached(True)
+                service._case_cache[cache_key] = interp
+                service._case_cache.move_to_end(cache_key)
+                return interp
+            elif isinstance(cached_val, str):
+                data = json.loads(cached_val)
+                interp = GroundedCaseInterpretation.model_validate(data).with_cached(True)
+                service._case_cache[cache_key] = interp
+                service._case_cache.move_to_end(cache_key)
+                return interp
+        except Exception:
+            # Stale/malformed cache entry: fall through to fresh generation
+            pass
+
+    try:
+        return service.interpret_case(
+            case_id=case_id,
+            graph=graph,
+            force_refresh=True,  # explicitly generate fresh
+        )
+    except HTTPException:
+        raise
+    except KeyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to generate interpretation for case '{case_id}': {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate interpretation for case '{case_id}'",
+        )
