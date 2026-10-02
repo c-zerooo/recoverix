@@ -19,7 +19,11 @@ from backend.app.models.interpretation import (
     GroundedCaseInterpretation,
 )
 from backend.app.store import store
-from backend.app.scoring.interpretation_service import get_interpretation_service
+from backend.app.recovery.graph import build_case_evidence_graph
+from backend.app.scoring.interpretation_service import (
+    get_interpretation_service,
+    compute_cluster_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +132,10 @@ def generate_artifact_interpretation(
     response_model=GroundedClusterInterpretation,
     status_code=status.HTTP_200_OK,
     summary="Get grounded cluster interpretation",
+    responses={
+        404: {"description": "Case, cluster, or interpretation not found"},
+        500: {"description": "Cached interpretation malformed"},
+    },
 )
 def get_cluster_interpretation(
     case_id: str,
@@ -137,10 +145,61 @@ def get_cluster_interpretation(
 
     Strictly read-only: does not generate interpretation, invoke LLMs, or mutate cache.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Cluster interpretation retrieval will be implemented in Phase 3.5.3.4",
-    )
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    try:
+        graph = build_case_evidence_graph(case_id=case_id, store=store)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    cluster = next((c for c in graph.clusters if c.cluster_id == cluster_id), None)
+    if cluster is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Cluster '{cluster_id}' not found in case '{case_id}'",
+        )
+
+    service = get_interpretation_service(store)
+    service._store = store
+
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case_id, cluster_id, cluster_fp)
+
+    if cache_key not in service._cluster_cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Interpretation not generated for cluster '{cluster_id}'. Call POST to generate.",
+        )
+
+    cached_val = service._cluster_cache[cache_key]
+    try:
+        if isinstance(cached_val, GroundedClusterInterpretation):
+            return cached_val.with_cached(True)
+        elif isinstance(cached_val, dict):
+            return GroundedClusterInterpretation.model_validate(cached_val).with_cached(True)
+        elif isinstance(cached_val, str):
+            data = json.loads(cached_val)
+            if not isinstance(data, dict):
+                raise ValueError("Cached interpretation is not a valid JSON dictionary")
+            return GroundedClusterInterpretation.model_validate(data).with_cached(True)
+        else:
+            raise ValueError(f"Unexpected cached value type: {type(cached_val)}")
+    except Exception:
+        logger.error(
+            f"Cached interpretation for cluster '{cluster_id}' in case '{case_id}' is malformed or invalid"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Cached interpretation for cluster '{cluster_id}' is malformed or invalid",
+        )
 
 
 @router.post(
@@ -148,6 +207,10 @@ def get_cluster_interpretation(
     response_model=GroundedClusterInterpretation,
     status_code=status.HTTP_200_OK,
     summary="Generate or refresh grounded cluster interpretation",
+    responses={
+        404: {"description": "Case or cluster not found"},
+        500: {"description": "Interpretation generation failed"},
+    },
 )
 def generate_cluster_interpretation(
     case_id: str,
@@ -158,10 +221,78 @@ def generate_cluster_interpretation(
     ),
 ) -> GroundedClusterInterpretation:
     """Generate or refresh grounded evidence interpretation for a spatial cluster."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Cluster interpretation generation will be implemented in Phase 3.5.3.4",
-    )
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    try:
+        graph = build_case_evidence_graph(case_id=case_id, store=store)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Case '{case_id}' not found",
+        )
+
+    cluster = next((c for c in graph.clusters if c.cluster_id == cluster_id), None)
+    if cluster is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Cluster '{cluster_id}' not found in case '{case_id}'",
+        )
+
+    service = get_interpretation_service(store)
+    service._store = store
+
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case_id, cluster_id, cluster_fp)
+
+    # When force_refresh=False and valid cached interpretation exists, return it directly
+    if not force_refresh and cache_key in service._cluster_cache:
+        cached_val = service._cluster_cache[cache_key]
+        try:
+            if isinstance(cached_val, GroundedClusterInterpretation):
+                service._cluster_cache.move_to_end(cache_key)
+                return cached_val.with_cached(True)
+            elif isinstance(cached_val, dict):
+                interp = GroundedClusterInterpretation.model_validate(cached_val).with_cached(True)
+                service._cluster_cache[cache_key] = interp
+                service._cluster_cache.move_to_end(cache_key)
+                return interp
+            elif isinstance(cached_val, str):
+                data = json.loads(cached_val)
+                interp = GroundedClusterInterpretation.model_validate(data).with_cached(True)
+                service._cluster_cache[cache_key] = interp
+                service._cluster_cache.move_to_end(cache_key)
+                return interp
+        except Exception:
+            # Stale/malformed cache entry: fall through to fresh generation
+            pass
+
+    try:
+        return service.interpret_cluster(
+            case_id=case_id,
+            cluster_id=cluster_id,
+            graph=graph,
+            force_refresh=True,  # explicitly generate fresh
+        )
+    except HTTPException:
+        raise
+    except KeyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to generate interpretation for cluster '{cluster_id}' in case '{case_id}': {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate interpretation for cluster '{cluster_id}' in case '{case_id}'",
+        )
 
 
 @router.get(

@@ -76,16 +76,7 @@ def test_03_route_response_models():
 
 
 def test_04_placeholder_endpoints_return_501(client: TestClient):
-    """Verify that remaining cluster and case placeholder endpoints return 501 Not Implemented."""
-    # Cluster routes (Phase 3.5.3.4)
-    res_get_cl = client.get("/api/cases/case_test_01/clusters/cluster_01/interpretation")
-    assert res_get_cl.status_code == 501
-    assert "3.5.3.4" in res_get_cl.json()["detail"]
-
-    res_post_cl = client.post("/api/cases/case_test_01/clusters/cluster_01/interpretation")
-    assert res_post_cl.status_code == 501
-    assert "3.5.3.4" in res_post_cl.json()["detail"]
-
+    """Verify that remaining case placeholder endpoints return 501 Not Implemented."""
     # Case routes (Phase 3.5.3.5)
     res_get_case = client.get("/api/cases/case_test_01/interpretation")
     assert res_get_case.status_code == 501
@@ -684,3 +675,551 @@ def test_17_legacy_explain_remains_functional_alongside_new_endpoints(client: Te
     data_get = res_get.json()
     assert data_get["cached"] is True
     assert data_get["facts"]["artifact_id"] == art_id
+
+
+def _make_test_recovery_run(
+    run_id: str,
+    case_id: str,
+    format: str = "json",
+    evidence_start: int = 0,
+    evidence_end: Optional[int] = 500,
+    evidence_file_id: Optional[str] = "ev_01",
+    verified_bytes: int = 500,
+    reconstructed_bytes: int = 0,
+    missing_bytes: int = 0,
+    detection_method: str = "magic_bytes",
+    status: str = "FULLY_RECOVERED",
+    confidence_score: float = 95.0,
+    filename: str = "evidence.bin",
+):
+    from datetime import datetime, timezone
+    from backend.app.models.recovery_run import RecoveryRun
+
+    prov = {
+        "evidence_start": evidence_start,
+        "coordinate_system": (
+            "physical_evidence_offsets"
+            if evidence_end is not None
+            else "whole_buffer_fallback"
+        ),
+        "detection_method": detection_method,
+        "case_id": case_id,
+    }
+    if evidence_end is not None:
+        prov["evidence_end"] = evidence_end
+    if evidence_file_id is not None:
+        prov["evidence_file_id"] = evidence_file_id
+
+    now = datetime.now(timezone.utc)
+    return RecoveryRun(
+        run_id=run_id,
+        case_id=case_id,
+        filename=filename,
+        format=format,
+        status=status,
+        started_at=now,
+        completed_at=now,
+        total_input_bytes=verified_bytes + reconstructed_bytes + missing_bytes,
+        total_verified_bytes=verified_bytes,
+        total_reconstructed_bytes=reconstructed_bytes,
+        total_missing_bytes=missing_bytes,
+        confidence={"total": confidence_score},
+        provenance=prov,
+    )
+
+
+def test_18_cluster_interpretation_get_missing_case_returns_404(client: TestClient):
+    """TEST 18: GET cluster interpretation with non-existent case returns 404."""
+    res = client.get("/api/cases/non_existent_case_18/clusters/cluster_01/interpretation")
+    assert res.status_code == 404
+    assert "Case 'non_existent_case_18' not found" in res.json()["detail"]
+
+
+def test_19_cluster_interpretation_get_missing_cluster_returns_404(client: TestClient):
+    """TEST 19: GET cluster interpretation with valid case but non-existent cluster returns 404."""
+    from backend.app.store import store
+    case = store.create_case("M353.4 Test 19 Case")
+    run = _make_test_recovery_run("run_test_19", case.case_id, evidence_start=0, evidence_end=100)
+    store.add_recovery_run(run)
+
+    res = client.get(f"/api/cases/{case.case_id}/clusters/non_existent_cluster_19/interpretation")
+    assert res.status_code == 404
+    assert f"Cluster 'non_existent_cluster_19' not found in case '{case.case_id}'" in res.json()["detail"]
+
+
+def test_20_cluster_interpretation_get_uninterpreted_returns_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 20: GET cluster with no interpretation returns 404.
+
+    Verifies:
+    - Status is 404 with guidance message.
+    - Zero provider invocations.
+    - Zero cache mutations.
+    - Zero SQLite writes.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+        InterpretationService,
+    )
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked during GET")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_cluster_with_fallback", forbid_provider)
+
+    case = store.create_case("M353.4 Test 20 Case")
+    run = _make_test_recovery_run("run_test_20", case.case_id, evidence_start=0, evidence_end=200)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    assert len(graph.clusters) > 0
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+    # Ensure cache is clear for this cluster
+    service._cluster_cache.pop(cache_key, None)
+    initial_cache_len = len(service._cluster_cache)
+
+    res = client.get(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res.status_code == 404
+    assert res.json()["detail"] == f"Interpretation not generated for cluster '{cluster.cluster_id}'. Call POST to generate."
+
+    # Cache length must remain unchanged
+    assert len(service._cluster_cache) == initial_cache_len
+    assert cache_key not in service._cluster_cache
+
+
+def test_21_cluster_interpretation_get_cached_returns_200(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 21: GET cluster with valid cached interpretation returns 200 with cached=True.
+
+    Verifies:
+    - Status 200.
+    - Returns valid GroundedClusterInterpretation.
+    - cached is True.
+    - Zero provider invocations.
+    - Zero regeneration.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+        InterpretationService,
+    )
+    from backend.app.models.interpretation import (
+        GroundedClusterInterpretation,
+        ProviderInterpretationOutput,
+    )
+
+    case = store.create_case("M353.4 Test 21 Case")
+    run = _make_test_recovery_run("run_test_21", case.case_id, evidence_start=0, evidence_end=300)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    assert len(graph.clusters) > 0
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+
+    # Seed the cache directly
+    facts = service.extract_cluster_facts(cluster, graph, case_id=case.case_id)
+    seeded_interp = GroundedClusterInterpretation(
+        facts=facts,
+        relationships=[],
+        interpretation=ProviderInterpretationOutput(
+            summary="Seeded cluster interpretation summary",
+            details=["Seeded observation 1"],
+            assessment="Seeded cluster assessment",
+            structural_context="Seeded structural context",
+            limitations="No limitations detected",
+            recommended_next_steps="Review cluster bounds",
+        ),
+        source="DETERMINISTIC_RULES",
+        cached=False,
+        generated_at="2026-10-02T12:00:00Z",
+        cluster_fingerprint=cluster_fp,
+    )
+    service._put_cluster_cache(cache_key, seeded_interp)
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked when cache hit on GET")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_cluster_with_fallback", forbid_provider)
+
+    res = client.get(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res.status_code == 200
+    data = res.json()
+
+    validated = GroundedClusterInterpretation.model_validate(data)
+    assert validated.cached is True
+    assert validated.facts.cluster_id == cluster.cluster_id
+    assert validated.interpretation.summary == "Seeded cluster interpretation summary"
+    assert validated.cluster_fingerprint == cluster_fp
+
+
+def test_22_cluster_interpretation_post_generates(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 22: POST cluster interpretation without existing cache generates fresh interpretation.
+
+    Verifies:
+    - Status 200.
+    - GroundedClusterInterpretation returned with cached=False.
+    - Grounded facts correspond to deterministic cluster facts.
+    - Cached in service._cluster_cache.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+    )
+    from backend.app.models.interpretation import GroundedClusterInterpretation
+
+    monkeypatch.setenv("RECOVERIX_OFFLINE", "1")
+
+    case = store.create_case("M353.4 Test 22 Case")
+    run = _make_test_recovery_run("run_test_22", case.case_id, evidence_start=100, evidence_end=400, format="png")
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+    service._cluster_cache.pop(cache_key, None)
+
+    res = client.post(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res.status_code == 200
+    data = res.json()
+
+    validated = GroundedClusterInterpretation.model_validate(data)
+    assert validated.cached is False
+    assert validated.facts.cluster_id == cluster.cluster_id
+    assert validated.facts.cluster_start == 100
+    assert validated.facts.cluster_end == 400
+    assert validated.cluster_fingerprint == cluster_fp
+    assert validated.source == "DETERMINISTIC_RULES"
+
+    # Must be stored in cache
+    assert cache_key in service._cluster_cache
+
+
+def test_23_cluster_interpretation_post_reuses_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 23: POST with force_refresh=False reuses existing cache without calling provider.
+
+    Verifies:
+    - Default force_refresh=False reuses existing cache entry.
+    - Explicit force_refresh=false query param reuses existing cache entry.
+    - Provider is not invoked.
+    - cached is True in response.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+        InterpretationService,
+    )
+    from backend.app.models.interpretation import (
+        GroundedClusterInterpretation,
+        ProviderInterpretationOutput,
+    )
+
+    case = store.create_case("M353.4 Test 23 Case")
+    run = _make_test_recovery_run("run_test_23", case.case_id, evidence_start=0, evidence_end=250)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+
+    facts = service.extract_cluster_facts(cluster, graph, case_id=case.case_id)
+    seeded_interp = GroundedClusterInterpretation(
+        facts=facts,
+        relationships=[],
+        interpretation=ProviderInterpretationOutput(
+            summary="Existing cluster summary to be reused",
+            details=["Detail 1"],
+            assessment="Assessment 1",
+            structural_context="Context 1",
+            limitations="No limitations",
+            recommended_next_steps="Next step 1",
+        ),
+        source="DETERMINISTIC_RULES",
+        cached=False,
+        generated_at="2026-10-02T12:00:00Z",
+        cluster_fingerprint=cluster_fp,
+    )
+    service._put_cluster_cache(cache_key, seeded_interp)
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked when cache hit on POST with force_refresh=False")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_cluster_with_fallback", forbid_provider)
+
+    # 1. Default POST (force_refresh omitted)
+    res_def = client.post(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res_def.status_code == 200
+    data_def = res_def.json()
+    assert data_def["cached"] is True
+    assert data_def["interpretation"]["summary"] == "Existing cluster summary to be reused"
+
+    # 2. Explicit POST with force_refresh=false
+    res_param = client.post(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation?force_refresh=false")
+    assert res_param.status_code == 200
+    data_param = res_param.json()
+    assert data_param["cached"] is True
+    assert data_param["interpretation"]["summary"] == "Existing cluster summary to be reused"
+
+
+def test_24_cluster_interpretation_post_force_refresh(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 24: POST with force_refresh=True regenerates and replaces cache entry.
+
+    Verifies:
+    - Provider is invoked.
+    - Response has cached=False and newly generated content.
+    - Cache is updated with newly generated interpretation.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+        InterpretationService,
+    )
+    from backend.app.models.interpretation import (
+        GroundedClusterInterpretation,
+        ProviderInterpretationOutput,
+    )
+
+    case = store.create_case("M353.4 Test 24 Case")
+    run = _make_test_recovery_run("run_test_24", case.case_id, evidence_start=0, evidence_end=250)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+
+    facts = service.extract_cluster_facts(cluster, graph, case_id=case.case_id)
+    old_interp = GroundedClusterInterpretation(
+        facts=facts,
+        relationships=[],
+        interpretation=ProviderInterpretationOutput(
+            summary="Outdated cluster summary",
+            details=["Old detail"],
+            assessment="Old assessment",
+            structural_context="Old context",
+            limitations="Old limitations",
+            recommended_next_steps="Old next steps",
+        ),
+        source="DETERMINISTIC_RULES",
+        cached=False,
+        generated_at="2026-10-01T00:00:00Z",
+        cluster_fingerprint=cluster_fp,
+    )
+    service._put_cluster_cache(cache_key, old_interp)
+
+    def mock_invoke(self, context):
+        return ProviderInterpretationOutput(
+            summary="Freshly regenerated cluster interpretation summary",
+            details=["Fresh detail 1"],
+            assessment="Fresh assessment",
+            structural_context="Fresh context",
+            limitations="Fresh limitations",
+            recommended_next_steps="Fresh next steps",
+        ), "GEMINI_1_5_FLASH"
+
+    monkeypatch.setattr(InterpretationService, "_invoke_cluster_with_fallback", mock_invoke)
+
+    res = client.post(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation?force_refresh=true")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["cached"] is False
+    assert data["source"] == "GEMINI_1_5_FLASH"
+    assert data["interpretation"]["summary"] == "Freshly regenerated cluster interpretation summary"
+
+    # Cached value must be updated
+    cached_val = service._cluster_cache[cache_key]
+    assert cached_val.interpretation.summary == "Freshly regenerated cluster interpretation summary"
+    assert cached_val.source == "GEMINI_1_5_FLASH"
+
+
+def test_25_unknown_scope_cluster_semantics(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """TEST 25: Unknown-scope nodes remain isolated singleton clusters and are correctly interpreted.
+
+    Verifies:
+    - Nodes without evidence_file_id do not merge with other scoped or unscoped nodes.
+    - Each remains an isolated singleton cluster (Rule 3.4).
+    - API endpoint routes and interprets the unknown-scope cluster correctly.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.models.interpretation import GroundedClusterInterpretation
+
+    monkeypatch.setenv("RECOVERIX_OFFLINE", "1")
+
+    case = store.create_case("M353.4 Test 25 Case")
+    # Create two runs with evidence_file_id=None (unknown scope)
+    run_unscoped_1 = _make_test_recovery_run(
+        "run_unscoped_01", case.case_id, evidence_start=100, evidence_end=200, evidence_file_id=None
+    )
+    run_unscoped_2 = _make_test_recovery_run(
+        "run_unscoped_02", case.case_id, evidence_start=150, evidence_end=250, evidence_file_id=None
+    )
+    store.add_recovery_run(run_unscoped_1)
+    store.add_recovery_run(run_unscoped_2)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    # Under Rule 3.4, unknown-scope nodes are NOT merged into a shared cluster even if they overlap!
+    # They MUST each be their own singleton cluster.
+    unscoped_clusters = [c for c in graph.clusters if c.evidence_file_id is None]
+    assert len(unscoped_clusters) == 2
+    for c in unscoped_clusters:
+        assert c.total_nodes == 1
+        assert c.relationship_classification == "ISOLATED"
+
+    target_cluster = unscoped_clusters[0]
+
+    # Generate interpretation via API
+    res = client.post(f"/api/cases/{case.case_id}/clusters/{target_cluster.cluster_id}/interpretation")
+    assert res.status_code == 200
+    data = res.json()
+
+    interp = GroundedClusterInterpretation.model_validate(data)
+    assert interp.facts.cluster_id == target_cluster.cluster_id
+    assert interp.facts.evidence_file_id is None
+    assert interp.facts.relationship_classification == "ISOLATED"
+    assert interp.facts.total_nodes == 1
+
+
+def test_26_cluster_fingerprint_changes_invalidates_cache_identity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 26: Changing cluster structure changes fingerprint and prevents stale cache reads.
+
+    Verifies:
+    - Interpreting cluster v1 caches under fingerprint 1.
+    - Modifying member node facts changes cluster fingerprint.
+    - GET with new fingerprint returns 404 (not yet generated for new fingerprint).
+    - POST with new fingerprint generates and caches under new fingerprint.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+    )
+
+    monkeypatch.setenv("RECOVERIX_OFFLINE", "1")
+
+    case = store.create_case("M353.4 Test 26 Case")
+    run_v1 = _make_test_recovery_run("run_fp_test", case.case_id, evidence_start=0, evidence_end=500, verified_bytes=500)
+    store.add_recovery_run(run_v1)
+
+    graph_v1 = build_case_evidence_graph(case.case_id, store=store)
+    cluster_v1 = graph_v1.clusters[0]
+    fp_v1 = compute_cluster_fingerprint(cluster_v1, graph_v1)
+
+    # Generate interpretation for v1
+    res_post_v1 = client.post(f"/api/cases/{case.case_id}/clusters/{cluster_v1.cluster_id}/interpretation")
+    assert res_post_v1.status_code == 200
+    assert res_post_v1.json()["cluster_fingerprint"] == fp_v1
+
+    # Verify GET returns 200 for v1
+    res_get_v1 = client.get(f"/api/cases/{case.case_id}/clusters/{cluster_v1.cluster_id}/interpretation")
+    assert res_get_v1.status_code == 200
+    assert res_get_v1.json()["cached"] is True
+
+    # Now modify the run (e.g. verified_bytes from 500 to 400, reconstructed_bytes to 100)
+    run_v2 = _make_test_recovery_run(
+        "run_fp_test", case.case_id, evidence_start=0, evidence_end=500, verified_bytes=400, reconstructed_bytes=100
+    )
+    store.add_recovery_run(run_v2)
+
+    graph_v2 = build_case_evidence_graph(case.case_id, store=store)
+    cluster_v2 = graph_v2.clusters[0]
+    fp_v2 = compute_cluster_fingerprint(cluster_v2, graph_v2)
+    assert fp_v1 != fp_v2, "Cluster fingerprint must change when member bytes change"
+
+    # GET must now return 404 because cache has no entry for (case_id, cluster_id, fp_v2)
+    res_get_v2 = client.get(f"/api/cases/{case.case_id}/clusters/{cluster_v2.cluster_id}/interpretation")
+    assert res_get_v2.status_code == 404
+    assert "Call POST to generate" in res_get_v2.json()["detail"]
+
+    # POST generates under new fingerprint
+    res_post_v2 = client.post(f"/api/cases/{case.case_id}/clusters/{cluster_v2.cluster_id}/interpretation")
+    assert res_post_v2.status_code == 200
+    assert res_post_v2.json()["cluster_fingerprint"] == fp_v2
+    assert res_post_v2.json()["cached"] is False
+
+
+def test_27_malformed_cached_cluster_interpretation_returns_controlled_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TEST 27: Malformed cached cluster interpretation returns controlled 500.
+
+    Verifies:
+    - Status is 500.
+    - Error detail explains cached interpretation is malformed or invalid.
+    - Zero provider invocations.
+    - GET does not regenerate or overwrite.
+    """
+    from backend.app.store import store
+    from backend.app.recovery.graph import build_case_evidence_graph
+    from backend.app.scoring.interpretation_service import (
+        get_interpretation_service,
+        compute_cluster_fingerprint,
+        InterpretationService,
+    )
+
+    case = store.create_case("M353.4 Test 27 Case")
+    run = _make_test_recovery_run("run_test_27", case.case_id, evidence_start=0, evidence_end=150)
+    store.add_recovery_run(run)
+
+    graph = build_case_evidence_graph(case.case_id, store=store)
+    cluster = graph.clusters[0]
+
+    service = get_interpretation_service(store)
+    cluster_fp = compute_cluster_fingerprint(cluster, graph)
+    cache_key = (case.case_id, cluster.cluster_id, cluster_fp)
+
+    # Inject malformed data into cache
+    service._cluster_cache[cache_key] = "NOT_A_VALID_INTERPRETATION_JSON{{{"
+
+    def forbid_provider(*args, **kwargs):
+        raise AssertionError("Provider must NOT be invoked when reading malformed cache on GET")
+
+    monkeypatch.setattr(InterpretationService, "_invoke_cluster_with_fallback", forbid_provider)
+
+    res = client.get(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res.status_code == 500
+    assert res.json()["detail"] == f"Cached interpretation for cluster '{cluster.cluster_id}' is malformed or invalid"
+
+    # Inject schema-violating dict
+    service._cluster_cache[cache_key] = {"unexpected_key": 999}
+    res_dict = client.get(f"/api/cases/{case.case_id}/clusters/{cluster.cluster_id}/interpretation")
+    assert res_dict.status_code == 500
+    assert res_dict.json()["detail"] == f"Cached interpretation for cluster '{cluster.cluster_id}' is malformed or invalid"
