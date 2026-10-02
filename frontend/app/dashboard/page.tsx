@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { fetchCase, fetchArtifacts } from "@/lib/api";
 import { ArtifactTable } from "@/components/dashboard/ArtifactTable";
+import { CaseInterpretationCard } from "@/components/case/CaseInterpretationCard";
 import { Loader2, UploadCloud } from "lucide-react";
 import { Case, Artifact } from "@/lib/types";
 
@@ -72,6 +73,7 @@ function DashboardContent() {
   }
 
   const { caseData, artifacts } = data;
+  const activeCaseId = caseData?.id || searchParams.get('case_id') || (typeof window !== 'undefined' ? localStorage.getItem('recoverix_active_case_id') : null) || 'case_001';
 
   const totalArts = artifacts.length;
   const fullyRec = artifacts.filter(a => a.status === 'FULLY_RECOVERED').length;
@@ -139,6 +141,9 @@ function DashboardContent() {
             <p className="text-2xl font-bold text-rose-600">{highCrit}</p>
           </div>
         </div>
+
+        {/* Grounded Case Interpretation */}
+        <CaseInterpretationCard caseId={activeCaseId} />
 
         {/* Artifacts Table */}
         <ArtifactTable artifacts={artifacts} />
