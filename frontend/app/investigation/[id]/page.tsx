@@ -21,6 +21,7 @@ import { SingleFileRecoveryResult, InvestigationContext } from "@/lib/types";
 import { FragmentGraph } from "@/components/investigation/FragmentGraph";
 import { ByteEvidenceMap } from "@/components/investigation/ByteEvidenceMap";
 import { AIEvidenceAnalyst } from "@/components/investigation/AIEvidenceAnalyst";
+import { ClusterInterpretationCard } from "@/components/investigation/ClusterInterpretationCard";
 
 export default function InvestigationPage({
   params,
@@ -36,8 +37,10 @@ export default function InvestigationPage({
   const [copiedPreview, setCopiedPreview] = useState(false);
   const [showRubricDetails, setShowRubricDetails] = useState(false);
   const [activeSection, setActiveSection] = useState<
-    "overview" | "fragments" | "map" | "preview" | "provenance" | "analyst"
+    "overview" | "fragments" | "cluster" | "map" | "preview" | "provenance" | "analyst"
   >("overview");
+  const [activeCaseId, setActiveCaseId] = useState<string>("case_001");
+  const [activeClusterId, setActiveClusterId] = useState<string>("cluster_0");
 
   useEffect(() => {
     async function loadInvestigation() {
@@ -66,6 +69,19 @@ export default function InvestigationPage({
           } catch (e) {
             console.warn("Failed to parse cached context", e);
           }
+        }
+
+        const sp = new URLSearchParams(window.location.search);
+        const urlCaseId = sp.get("case_id");
+        const urlClusterId = sp.get("cluster_id");
+        const localCaseId = localStorage.getItem("recoverix_active_case_id");
+        if (urlCaseId) {
+          setActiveCaseId(urlCaseId);
+        } else if (localCaseId) {
+          setActiveCaseId(localCaseId);
+        }
+        if (urlClusterId) {
+          setActiveClusterId(urlClusterId);
         }
       }
 
@@ -256,6 +272,7 @@ export default function InvestigationPage({
             {[
               { id: "overview", label: "Overview" },
               { id: "fragments", label: "Fragments" },
+              { id: "cluster", label: "Cluster Interpretation" },
               { id: "map", label: "Evidence Map" },
               { id: "preview", label: "Recovery" },
               { id: "provenance", label: "Provenance" },
@@ -263,10 +280,16 @@ export default function InvestigationPage({
             ].map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveSection(tab.id as any)}
-                className={`px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                onClick={() => {
+                  setActiveSection(tab.id as any);
+                  const el = document.getElementById(tab.id);
+                  if (el) {
+                    el.scrollIntoView({ behavior: "smooth" });
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-lg transition-colors font-medium cursor-pointer ${
                   activeSection === tab.id
-                    ? "bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold shadow-2xs"
+                    ? "bg-purple-50 text-purple-800 border border-purple-300 font-bold shadow-2xs"
                     : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
                 }`}
               >
@@ -398,6 +421,17 @@ export default function InvestigationPage({
             format={result.format}
             reconstructionMethod={result.reconstruction_method}
             validationStatus={result.validation_status}
+          />
+        </section>
+
+        {/* ========================================================================= */}
+        {/* SECTION 2.5 — CLUSTER-LEVEL GROUNDED INTERPRETATION */}
+        {/* ========================================================================= */}
+        <section id="cluster" className="space-y-4">
+          <ClusterInterpretationCard
+            caseId={activeCaseId}
+            clusterId={activeClusterId}
+            onClusterChange={setActiveClusterId}
           />
         </section>
 
