@@ -169,3 +169,163 @@ export interface SingleFileRecoveryResult {
   context?: InvestigationContext;
 }
 
+/**
+ * Milestone 3.5: Grounded Evidence Interpretation Types.
+ * Faithfully mirror backend contracts in backend/app/models/interpretation.py.
+ */
+
+export type AuthoritativeRecoveryStatus =
+  | 'FULLY_RECOVERED'
+  | 'PARTIALLY_RECOVERED'
+  | 'CORRUPTED'
+  | 'UNRECOVERABLE';
+
+export type AuthoritativeClusterClassification =
+  | 'ISOLATED'
+  | 'COEXTENSIVE_SET'
+  | 'CONTAINMENT_TREE'
+  | 'OVERLAP_SPAN'
+  | 'MIXED';
+
+export type InterpretationSource =
+  | 'DETERMINISTIC_RULES'
+  | 'GEMINI_1_5_FLASH';
+
+export interface DeterministicArtifactFacts {
+  artifact_id: string;
+  run_id?: string | null;
+  case_id?: string | null;
+  evidence_file_id?: string | null;
+  filename: string;
+  format: string;
+  category: string;
+  status: AuthoritativeRecoveryStatus;
+  confidence_score: number;
+  priority: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  verified_bytes: number;
+  reconstructed_bytes: number;
+  missing_bytes: number;
+  total_input_bytes?: number | null;
+  reconstruction_method: string;
+  validation_status: string;
+  damage_region_count: number;
+  is_ambiguous: boolean;
+  evidence_start?: number | null;
+  evidence_end?: number | null;
+}
+
+export interface DeterministicRelationshipFact {
+  edge_id: string;
+  source_node_id: string;
+  target_node_id: string;
+  relationship_type: 'COEXTENSIVE' | 'CONTAINS' | 'CONTAINED_BY' | 'OVERLAPS';
+  evidence_file_id: string;
+  evidence_basis: string;
+  overlap_start?: number | null;
+  overlap_end?: number | null;
+  overlap_bytes: number;
+}
+
+export interface DeterministicClusterFacts {
+  cluster_id: string;
+  case_id: string;
+  evidence_file_id?: string | null;
+  cluster_start: number;
+  cluster_end?: number | null;
+  bounding_span_bytes?: number | null;
+  unique_physical_bytes?: number | null;
+  bounded_physical_bytes: number;
+  has_unbounded_candidate: boolean;
+  relationship_classification: AuthoritativeClusterClassification;
+  has_ambiguity: boolean;
+  total_nodes: number;
+  coextensive_candidate_count: number;
+  containment_edge_count: number;
+  overlap_edge_count: number;
+  competing_format_count: number;
+  member_formats: string[];
+  member_node_ids: string[];
+  max_confidence_score: number;
+  highest_priority: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  candidate_aggregate_verified_bytes: number;
+  candidate_aggregate_reconstructed_bytes: number;
+  candidate_aggregate_missing_bytes: number;
+  status_distribution: Record<string, number>;
+  total_damage_regions: number;
+}
+
+export interface DeterministicCaseFacts {
+  case_id: string;
+  total_evidence_buffers: number;
+  total_artifacts: number;
+  total_nodes: number;
+  total_clusters: number;
+  case_physical_coverage_bytes?: number | null;
+  case_coverage_is_complete: boolean;
+  candidate_aggregate_verified_bytes: number;
+  candidate_aggregate_reconstructed_bytes: number;
+  candidate_aggregate_missing_bytes: number;
+  unscoped_candidate_count: number;
+  unscoped_aggregate_verified_bytes: number;
+  format_distribution: Record<string, number>;
+  status_distribution: Record<string, number>;
+  priority_distribution: Record<string, number>;
+  cluster_classification_distribution: Record<string, number>;
+  candidate_cap_enforced: boolean;
+  total_discovered_candidates: number;
+  candidates_omitted: number;
+  graph_is_complete: boolean;
+}
+
+export interface ArtifactInterpretationContext {
+  facts: DeterministicArtifactFacts;
+  content_preview?: string | null;
+  cluster_context?: DeterministicClusterFacts | null;
+}
+
+export interface ClusterInterpretationContext {
+  facts: DeterministicClusterFacts;
+  nodes: DeterministicArtifactFacts[];
+  relationships: DeterministicRelationshipFact[];
+}
+
+export interface CaseInterpretationContext {
+  facts: DeterministicCaseFacts;
+  cluster_facts: DeterministicClusterFacts[];
+}
+
+export interface ProviderInterpretationOutput {
+  summary: string;
+  assessment: string;
+  structural_context: string;
+  limitations: string;
+  recommended_next_steps: string;
+  details: string[];
+}
+
+export interface GroundedArtifactInterpretation {
+  facts: DeterministicArtifactFacts;
+  interpretation: ProviderInterpretationOutput;
+  source: InterpretationSource;
+  cached: boolean;
+  generated_at: string;
+}
+
+export interface GroundedClusterInterpretation {
+  facts: DeterministicClusterFacts;
+  relationships: DeterministicRelationshipFact[];
+  interpretation: ProviderInterpretationOutput;
+  source: InterpretationSource;
+  cached: boolean;
+  generated_at: string;
+  cluster_fingerprint: string;
+}
+
+export interface GroundedCaseInterpretation {
+  facts: DeterministicCaseFacts;
+  interpretation: ProviderInterpretationOutput;
+  source: InterpretationSource;
+  cached: boolean;
+  generated_at: string;
+  case_graph_fingerprint: string;
+}

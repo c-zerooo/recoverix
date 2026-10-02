@@ -1,4 +1,14 @@
-import { Artifact, Case, AIExplanation, ArtifactCategory, PriorityLevel, SingleFileRecoveryResult } from './types';
+import {
+  Artifact,
+  Case,
+  AIExplanation,
+  ArtifactCategory,
+  PriorityLevel,
+  SingleFileRecoveryResult,
+  GroundedArtifactInterpretation,
+  GroundedClusterInterpretation,
+  GroundedCaseInterpretation,
+} from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
@@ -861,5 +871,181 @@ export async function fetchInvestigationExplanation(
   };
 }
 
+// ============================================================================
+// Milestone 3.5.3.6: Grounded Evidence Interpretation API Client
+// ============================================================================
 
+/**
+ * Standard typed API error representing HTTP failure responses from the backend.
+ * Preserves the HTTP status code (e.g. 404 for ungenerated interpretations, 500 for failures)
+ * and response detail payload.
+ */
+export class ApiError extends Error {
+  status: number;
+  detail?: string | Record<string, unknown>;
 
+  constructor(status: number, message: string, detail?: string | Record<string, unknown>) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Shared HTTP request helper for interpretation API endpoints.
+ * Handles URL encoding, query parameters (?force_refresh=true only on POST when requested),
+ * cache-busting ('no-store'), JSON deserialization, and structured error throwing.
+ */
+async function fetchInterpretationJson<T>(
+  endpoint: string,
+  method: 'GET' | 'POST',
+  forceRefresh?: boolean
+): Promise<T> {
+  const query = method === 'POST' && forceRefresh === true ? '?force_refresh=true' : '';
+  const url = `${API_BASE}${endpoint}${query}`;
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (res.ok) {
+    return (await res.json()) as T;
+  }
+
+  let detail: any;
+  try {
+    const errData = await res.json();
+    detail = errData.detail;
+  } catch {
+    // Non-JSON or empty response body
+  }
+
+  const message =
+    typeof detail === 'string'
+      ? detail
+      : detail
+      ? JSON.stringify(detail)
+      : `HTTP ${res.status}: ${res.statusText || 'Request failed'}`;
+
+  throw new ApiError(res.status, message, detail);
+}
+
+/**
+ * Retrieve persisted grounded interpretation for an artifact.
+ * Strictly read-only: does not generate interpretation or invoke LLMs.
+ * Throws ApiError with status 404 if artifact or interpretation is not found.
+ */
+export async function getArtifactInterpretation(
+  artifactId: string
+): Promise<GroundedArtifactInterpretation> {
+  return fetchInterpretationJson<GroundedArtifactInterpretation>(
+    `/api/artifacts/${encodeURIComponent(artifactId)}/interpretation`,
+    'GET'
+  );
+}
+
+/**
+ * Generate or refresh grounded interpretation for an artifact.
+ * When forceRefresh is false (default), reuses existing persisted interpretation if available.
+ * When forceRefresh is true, explicitly regenerates fresh interpretation.
+ */
+export async function generateArtifactInterpretation(
+  artifactId: string,
+  forceRefresh = false
+): Promise<GroundedArtifactInterpretation> {
+  return fetchInterpretationJson<GroundedArtifactInterpretation>(
+    `/api/artifacts/${encodeURIComponent(artifactId)}/interpretation`,
+    'POST',
+    forceRefresh
+  );
+}
+
+/**
+ * Retrieve cached grounded interpretation for a spatial cluster.
+ * Strictly read-only: does not generate interpretation or invoke LLMs.
+ * Throws ApiError with status 404 if case, cluster, or interpretation is not found.
+ */
+export async function getClusterInterpretation(
+  caseId: string,
+  clusterId: string
+): Promise<GroundedClusterInterpretation> {
+  return fetchInterpretationJson<GroundedClusterInterpretation>(
+    `/api/cases/${encodeURIComponent(caseId)}/clusters/${encodeURIComponent(clusterId)}/interpretation`,
+    'GET'
+  );
+}
+
+/**
+ * Generate or refresh grounded interpretation for a spatial cluster.
+ * When forceRefresh is false (default), reuses existing cached interpretation if available.
+ * When forceRefresh is true, explicitly regenerates fresh interpretation.
+ */
+export async function generateClusterInterpretation(
+  caseId: string,
+  clusterId: string,
+  forceRefresh = false
+): Promise<GroundedClusterInterpretation> {
+  return fetchInterpretationJson<GroundedClusterInterpretation>(
+    `/api/cases/${encodeURIComponent(caseId)}/clusters/${encodeURIComponent(clusterId)}/interpretation`,
+    'POST',
+    forceRefresh
+  );
+}
+
+/**
+ * Retrieve cached grounded forensic briefing and synthesis for a case.
+ * Strictly read-only: does not generate interpretation or invoke LLMs.
+ * Throws ApiError with status 404 if case or interpretation is not found.
+ */
+export async function getCaseInterpretation(
+  caseId: string
+): Promise<GroundedCaseInterpretation> {
+  return fetchInterpretationJson<GroundedCaseInterpretation>(
+    `/api/cases/${encodeURIComponent(caseId)}/interpretation`,
+    'GET'
+  );
+}
+
+/**
+ * Generate or refresh grounded forensic briefing and synthesis for a case.
+ * When forceRefresh is false (default), reuses existing cached interpretation if available.
+ * When forceRefresh is true, explicitly regenerates fresh interpretation.
+ */
+export async function generateCaseInterpretation(
+  caseId: string,
+  forceRefresh = false
+): Promise<GroundedCaseInterpretation> {
+  return fetchInterpretationJson<GroundedCaseInterpretation>(
+    `/api/cases/${encodeURIComponent(caseId)}/interpretation`,
+    'POST',
+    forceRefresh
+  );
+}
+
+// Aliases matching "fetch..." naming convention
+export const fetchArtifactInterpretation = getArtifactInterpretation;
+export const fetchClusterInterpretation = getClusterInterpretation;
+export const fetchCaseInterpretation = getCaseInterpretation;
+
+// Re-export interpretation types for convenient importing from @/lib/api
+export type {
+  AuthoritativeRecoveryStatus,
+  AuthoritativeClusterClassification,
+  InterpretationSource,
+  DeterministicArtifactFacts,
+  DeterministicRelationshipFact,
+  DeterministicClusterFacts,
+  DeterministicCaseFacts,
+  ArtifactInterpretationContext,
+  ClusterInterpretationContext,
+  CaseInterpretationContext,
+  ProviderInterpretationOutput,
+  GroundedArtifactInterpretation,
+  GroundedClusterInterpretation,
+  GroundedCaseInterpretation,
+} from './types';
