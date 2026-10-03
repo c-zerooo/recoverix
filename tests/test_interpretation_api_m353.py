@@ -36,7 +36,10 @@ def test_01_router_import_and_definition():
 
 
 def test_02_routes_mounted_on_app():
-    """Verify all six canonical route shapes are mounted on FastAPI app."""
+    """Verify all six canonical route shapes are mounted on FastAPI app via OpenAPI schema."""
+    openapi = app.openapi()
+    paths = openapi.get("paths", {})
+
     expected_routes = {
         ("GET", "/api/artifacts/{artifact_id}/interpretation"),
         ("POST", "/api/artifacts/{artifact_id}/interpretation"),
@@ -47,32 +50,54 @@ def test_02_routes_mounted_on_app():
     }
 
     actual_routes = set()
-    for route in app.routes:
-        if hasattr(route, "methods") and hasattr(route, "path"):
-            for method in route.methods:
-                if method in ("GET", "POST"):
-                    actual_routes.add((method, route.path))
+    for path, methods in paths.items():
+        for method in methods:
+            if method.upper() in ("GET", "POST"):
+                actual_routes.add((method.upper(), path))
 
     for method, path in expected_routes:
         assert (method, path) in actual_routes, f"Missing route: {method} {path}"
 
 
 def test_03_route_response_models():
-    """Verify that the mounted routes declare the canonical response models."""
-    route_models = {}
-    for route in app.routes:
-        if hasattr(route, "path") and hasattr(route, "response_model"):
-            route_models[(list(route.methods)[0] if hasattr(route, "methods") else None, route.path)] = route.response_model
+    """Verify that the routes declare canonical response models via router and OpenAPI schema."""
+    # 1. Verify response models on the interpretation router directly
+    tested_router_routes = 0
+    for route in interpretation_router.routes:
+        if route.path == "/artifacts/{artifact_id}/interpretation":
+            assert route.response_model is GroundedArtifactInterpretation
+            tested_router_routes += 1
+        elif route.path == "/cases/{case_id}/clusters/{cluster_id}/interpretation":
+            assert route.response_model is GroundedClusterInterpretation
+            tested_router_routes += 1
+        elif route.path == "/cases/{case_id}/interpretation":
+            assert route.response_model is GroundedCaseInterpretation
+            tested_router_routes += 1
+    assert tested_router_routes == 6
 
-    # Check that the routes map to canonical models
-    for route in app.routes:
-        if hasattr(route, "path") and hasattr(route, "methods"):
-            if route.path == "/api/artifacts/{artifact_id}/interpretation":
-                assert route.response_model is GroundedArtifactInterpretation
-            elif route.path == "/api/cases/{case_id}/clusters/{cluster_id}/interpretation":
-                assert route.response_model is GroundedClusterInterpretation
-            elif route.path == "/api/cases/{case_id}/interpretation":
-                assert route.response_model is GroundedCaseInterpretation
+    # 2. Verify response models in the mounted app's OpenAPI schema
+    openapi = app.openapi()
+    paths = openapi.get("paths", {})
+    schemas = openapi.get("components", {}).get("schemas", {})
+
+    expected_models = {
+        "/api/artifacts/{artifact_id}/interpretation": GroundedArtifactInterpretation,
+        "/api/cases/{case_id}/clusters/{cluster_id}/interpretation": GroundedClusterInterpretation,
+        "/api/cases/{case_id}/interpretation": GroundedCaseInterpretation,
+    }
+
+    tested_openapi_operations = 0
+    for path, model in expected_models.items():
+        assert path in paths, f"Missing path in OpenAPI: {path}"
+        path_item = paths[path]
+        for method in ("get", "post"):
+            assert method in path_item, f"Missing method {method} on {path}"
+            op = path_item[method]
+            schema_ref = op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+            assert schema_ref == f"#/components/schemas/{model.__name__}"
+            assert model.__name__ in schemas
+            tested_openapi_operations += 1
+    assert tested_openapi_operations == 6
 
 
 def test_04_no_remaining_placeholder_endpoints(client: TestClient):
