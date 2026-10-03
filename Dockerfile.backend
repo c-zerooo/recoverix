@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy packaging configuration first for optimal Docker layer caching
+COPY pyproject.toml README.md ./
+
+# Install project and dependencies strictly via pyproject.toml
+RUN pip install --no-cache-dir .
+
+# Copy backend source code
+COPY backend ./backend
+
+# Create runtime data directory for SQLite database persistence
+RUN mkdir -p /app/data
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    RECOVERIX_DB_PATH=/app/data/recoverix.db
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

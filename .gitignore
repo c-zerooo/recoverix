@@ -14,3 +14,8 @@ backend/generated/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+
+# Environment files
+.env
+.env.local
+.env.*.local
