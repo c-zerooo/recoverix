@@ -76,28 +76,28 @@ class ObservedRecoverySegment(BaseModel):
         e_len = (e_end - e_start) if (e_start is not None and e_end is not None) else None
 
         if self.category == "VERIFIED":
-            if o_len is None or r_len is None:
-                raise ValueError("VERIFIED segments must define original and recovered intervals")
-            if o_len != r_len:
+            if r_len is None and e_len is None:
+                raise ValueError("VERIFIED segments must define recovered or evidence interval")
+            if o_len is not None and r_len is not None and o_len != r_len:
                 raise ValueError(
                     f"VERIFIED segment length mismatch: original {o_len} != recovered {r_len}"
                 )
-            if e_len is not None and e_len != o_len:
+            if e_len is not None and o_len is not None and e_len != o_len:
                 raise ValueError(
                     f"VERIFIED segment length mismatch: evidence {e_len} != original {o_len}"
                 )
 
         elif self.category == "MISSING":
-            if o_len is None:
-                raise ValueError("MISSING segments must define original interval")
             if r_len is not None or r_start is not None:
                 raise ValueError("MISSING segments cannot have recovered payload coordinates")
-            if e_len is not None or e_start is not None:
-                raise ValueError("MISSING segments cannot have evidence coordinates")
 
         elif self.category == "RECONSTRUCTED":
-            if r_len is None:
-                raise ValueError("RECONSTRUCTED segments must define recovered payload interval")
+            if r_len is None and e_len is None:
+                raise ValueError("RECONSTRUCTED segments must define recovered or evidence interval")
+            if o_len is not None and r_len is not None and o_len != r_len:
+                raise ValueError(
+                    f"RECONSTRUCTED segment length mismatch: original {o_len} != recovered {r_len}"
+                )
 
         return self
 

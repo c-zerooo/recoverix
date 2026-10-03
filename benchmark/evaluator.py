@@ -61,21 +61,24 @@ def audit_false_recovery(
 
     # Rule 1: Damaged artifact cannot be FULLY_RECOVERED
     if is_damaged and recovery.observed_status == "FULLY_RECOVERED":
-        violations.append("FALSE_FULLY_RECOVERED: Damaged artifact reported as FULLY_RECOVERED")
+        violations.append("Benchmark finding: FALSE_FULLY_RECOVERED — Ground-truth damaged artifact reported as FULLY_RECOVERED")
 
     # Rule 2: R > 0 or M > 0 cannot be FULLY_RECOVERED
     if (recovery.total_reconstructed_bytes > 0 or recovery.total_missing_bytes > 0) and recovery.observed_status == "FULLY_RECOVERED":
-        violations.append("INVALID_STATUS_INVARIANT: FULLY_RECOVERED claimed with R > 0 or M > 0")
+        violations.append("Benchmark finding: INVALID_STATUS_INVARIANT — FULLY_RECOVERED claimed with R > 0 or M > 0")
 
     # Rule 3: Physical gaps cannot disappear from missing accounting
     if has_unrepaired_gap and recovery.total_missing_bytes == 0:
-        violations.append("UNACCOUNTED_GAP: Physical gap present in GT but observed missing_bytes == 0")
+        violations.append(
+            f"Benchmark finding: UNACCOUNTED_GAP — Physical gap present in ground truth "
+            f"({expectation.expected_missing_bytes} bytes), but observed missing_bytes == 0"
+        )
 
     # Rule 4: Total verified bytes cannot exceed physically surviving evidence bytes
     surviving_evidence_bytes = sum(p.evidence_length for p in artifact.placements)
     if recovery.total_verified_bytes > surviving_evidence_bytes:
         violations.append(
-            f"OVERSTATED_VERIFICATION: Verified bytes ({recovery.total_verified_bytes}) "
+            f"Benchmark finding: OVERSTATED_VERIFICATION — Observed verified bytes ({recovery.total_verified_bytes}) "
             f"> surviving evidence bytes ({surviving_evidence_bytes})"
         )
 
@@ -93,7 +96,7 @@ def audit_false_recovery(
             orig_slice = orig_bytes[seg.original_start : seg.original_end]
             if payload_slice != orig_slice:
                 violations.append(
-                    f"FALSE_VERIFIED_BYTES: Divergence in segment {seg.segment_id}: "
+                    f"Benchmark finding: FALSE_VERIFIED_BYTES — Divergence in segment {seg.segment_id}: "
                     f"payload[{seg.recovered_start}:{seg.recovered_end}] != "
                     f"original[{seg.original_start}:{seg.original_end}]"
                 )
@@ -102,7 +105,7 @@ def audit_false_recovery(
     # Rule 6: Unrecoverable scenario archetype must be declared UNRECOVERABLE
     if artifact.is_unrecoverable and recovery.observed_status != "UNRECOVERABLE":
         violations.append(
-            f"UNRECOVERABLE_MISCLASSIFIED: Unrecoverable artifact reported as {recovery.observed_status}"
+            f"Benchmark finding: UNRECOVERABLE_MISCLASSIFIED — Ground-truth unrecoverable scenario reported as {recovery.observed_status}"
         )
 
     # Rule 7: Reconstructed byte divergence when deterministic repair is expected
@@ -115,7 +118,7 @@ def audit_false_recovery(
                     actual_r_b = payload_bytes[seg.recovered_start : seg.recovered_end]
                     if actual_r_b != expected_r_b:
                         violations.append(
-                            f"FALSE_RECONSTRUCTED_BYTES: Reconstructed bytes in segment {seg.segment_id} "
+                            f"Benchmark finding: FALSE_RECONSTRUCTED_BYTES — Reconstructed bytes in segment {seg.segment_id} "
                             f"diverge from expected deterministic repair: {actual_r_b!r} != {expected_r_b!r}"
                         )
                         break

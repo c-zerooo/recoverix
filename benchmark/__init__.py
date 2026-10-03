@@ -44,6 +44,11 @@ from benchmark.evaluator import (
     audit_false_recovery,
     evaluate_scenario,
 )
+from benchmark.run_baseline import (
+    build_ground_truth_manifest,
+    run_baseline_benchmark,
+    run_pipeline_and_observe,
+)
 
 __all__ = [
     "BenchmarkGroundTruthManifest",
@@ -69,4 +74,7 @@ __all__ = [
     "EvaluationReport",
     "audit_false_recovery",
     "evaluate_scenario",
+    "build_ground_truth_manifest",
+    "run_baseline_benchmark",
+    "run_pipeline_and_observe",
 ]

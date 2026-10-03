@@ -122,18 +122,19 @@ class EvaluationMetrics:
     format: str
 
     # Volume accuracy
+    # Aggregate Volume Accounting (aggregate byte counts only; does not imply byte or coordinate correctness)
     v_volume_accuracy: float
     r_volume_accuracy: float
     m_volume_accuracy: float
 
-    # Interval IoU accuracy in original coordinate space
-    v_interval_iou: float
-    m_interval_iou: float
-    r_interval_iou: float
+    # Original-Space Interval IoU (Jaccard similarity in original coordinates; None if original coordinates are unavailable)
+    v_interval_iou: Optional[float]
+    m_interval_iou: Optional[float]
+    r_interval_iou: Optional[float]
 
-    # Byte-level correctness
-    v_byte_correctness: float
-    r_byte_correctness: Optional[float]  # None if no deterministic repair expected
+    # Original-Space Byte Correctness (payload[R_s:R_e] == original[O_s:O_e]; None if coordinates unavailable)
+    v_byte_correctness: Optional[float]
+    r_byte_correctness: Optional[float]  # None if no deterministic repair expected or coords not established
 
     # Status
     expected_status: str
@@ -143,6 +144,9 @@ class EvaluationMetrics:
     # Forensic False Recovery
     false_fully_recovered: bool
 
+    # Whole-Payload SHA-256 Match (actual payload bytes == original ground truth bytes; None if no payload produced)
+    whole_payload_hash_match: Optional[bool] = None
+
 
 def compute_evaluation_metrics(
     artifact: PhysicalArtifactRecord,
@@ -150,12 +154,19 @@ def compute_evaluation_metrics(
     recovery: ObservedArtifactRecoveryResult,
 ) -> EvaluationMetrics:
     """Calculate foundational metrics for one artifact recovery result."""
-    # 1. Volume accuracy
+    # 1. Aggregate Volume Accounting (aggregate byte count comparisons only)
     v_vol_acc = compute_volume_ratio(recovery.total_verified_bytes, expectation.expected_verified_bytes)
     r_vol_acc = compute_volume_ratio(recovery.total_reconstructed_bytes, expectation.expected_reconstructed_bytes)
     m_vol_acc = compute_volume_ratio(recovery.total_missing_bytes, expectation.expected_missing_bytes)
 
-    # 2. Interval IoU in original coordinates
+    # 2. Original-Space Coordinate Availability
+    # Original coordinates are ONLY valid if established by the recovery run.
+    # If no segment defines original coordinates, original-space interval IoU and byte correctness MUST be None.
+    has_any_orig = any(
+        s.original_start is not None and s.original_end is not None
+        for s in (recovery.verified_segments + recovery.reconstructed_segments + recovery.missing_segments)
+    )
+
     obs_v_intervals = [
         (s.original_start, s.original_end)
         for s in recovery.verified_segments
@@ -172,9 +183,14 @@ def compute_evaluation_metrics(
         if s.original_start is not None and s.original_end is not None
     ]
 
-    v_iou = compute_interval_iou(obs_v_intervals, expectation.expected_surviving_intervals)
-    m_iou = compute_interval_iou(obs_m_intervals, expectation.expected_missing_intervals)
-    r_iou = compute_interval_iou(obs_r_intervals, expectation.expected_reconstructed_intervals)
+    if has_any_orig:
+        v_iou: Optional[float] = compute_interval_iou(obs_v_intervals, expectation.expected_surviving_intervals)
+        m_iou: Optional[float] = compute_interval_iou(obs_m_intervals, expectation.expected_missing_intervals)
+        r_iou: Optional[float] = compute_interval_iou(obs_r_intervals, expectation.expected_reconstructed_intervals)
+    else:
+        v_iou = None
+        m_iou = None
+        r_iou = None
 
     # 3. Byte-level verified correctness: payload[R_s:R_e] == original[O_s:O_e]
     orig_bytes = artifact.original_bytes
@@ -198,10 +214,13 @@ def compute_evaluation_metrics(
 
             correct_v_bytes += sum(1 for p_b, o_b in zip(payload_slice, orig_slice) if p_b == o_b)
 
-    if total_v_bytes == 0:
-        v_byte_corr = 1.0 if expectation.expected_verified_bytes == 0 else 0.0
+    if has_any_orig:
+        if total_v_bytes == 0:
+            v_byte_corr: Optional[float] = 1.0 if expectation.expected_verified_bytes == 0 else 0.0
+        else:
+            v_byte_corr = correct_v_bytes / total_v_bytes
     else:
-        v_byte_corr = correct_v_bytes / total_v_bytes
+        v_byte_corr = None
 
     # 4. Byte-level reconstructed correctness
     r_byte_corr: Optional[float] = None
@@ -214,17 +233,24 @@ def compute_evaluation_metrics(
             )
 
     if expected_r_bytes_map:
-        total_r_eval_bytes = 0
-        correct_r_eval_bytes = 0
-        for seg in recovery.reconstructed_segments:
-            if seg.original_start is not None and seg.original_end is not None:
-                span = (seg.original_start, seg.original_end)
-                if span in expected_r_bytes_map:
-                    expected_b = expected_r_bytes_map[span]
-                    actual_b = payload_bytes[seg.recovered_start : seg.recovered_end]
-                    total_r_eval_bytes += max(len(expected_b), len(actual_b))
-                    correct_r_eval_bytes += sum(1 for a, b in zip(actual_b, expected_b) if a == b)
-        r_byte_corr = (correct_r_eval_bytes / total_r_eval_bytes) if total_r_eval_bytes > 0 else 0.0
+        if has_any_orig:
+            total_r_eval_bytes = 0
+            correct_r_eval_bytes = 0
+            for seg in recovery.reconstructed_segments:
+                if seg.original_start is not None and seg.original_end is not None:
+                    span = (seg.original_start, seg.original_end)
+                    if span in expected_r_bytes_map:
+                        expected_b = expected_r_bytes_map[span]
+                        actual_b = (
+                            payload_bytes[seg.recovered_start : seg.recovered_end]
+                            if (seg.recovered_start is not None and seg.recovered_end is not None)
+                            else b""
+                        )
+                        total_r_eval_bytes += max(len(expected_b), len(actual_b))
+                        correct_r_eval_bytes += sum(1 for a, b in zip(actual_b, expected_b) if a == b)
+            r_byte_corr = (correct_r_eval_bytes / total_r_eval_bytes) if total_r_eval_bytes > 0 else 0.0
+        else:
+            r_byte_corr = None
 
     # 5. Status match
     status_match = (recovery.observed_status == expectation.expected_status)
@@ -236,7 +262,23 @@ def compute_evaluation_metrics(
         or expectation.expected_missing_bytes > 0
         or expectation.expected_reconstructed_bytes > 0
     )
-    false_full = (is_damaged and recovery.observed_status == "FULLY_RECOVERED")
+    false_full = (
+        (is_damaged and recovery.observed_status == "FULLY_RECOVERED")
+        or ((recovery.total_reconstructed_bytes > 0 or recovery.total_missing_bytes > 0) and recovery.observed_status == "FULLY_RECOVERED")
+    )
+
+    # 7. Whole-payload SHA-256 hash match against ground-truth original bytes
+    # Computed strictly from actual recovered payload bytes vs original ground-truth bytes.
+    # Never inferred from V/R/M byte counts, candidate ID, or recovery status.
+    whole_payload_hash_match: Optional[bool]
+    if recovery.recovered_payload_bytes:
+        import hashlib
+        computed_sha = hashlib.sha256(recovery.recovered_payload_bytes).hexdigest().lower()
+        whole_payload_hash_match = (computed_sha == artifact.original_sha256.lower())
+    elif artifact.original_size_bytes == 0 and recovery.recovered_payload_bytes == b"":
+        whole_payload_hash_match = True
+    else:
+        whole_payload_hash_match = None
 
     return EvaluationMetrics(
         artifact_id=artifact.artifact_id,
@@ -253,6 +295,7 @@ def compute_evaluation_metrics(
         observed_status=recovery.observed_status,
         status_match=status_match,
         false_fully_recovered=false_full,
+        whole_payload_hash_match=whole_payload_hash_match,
     )
 
 
