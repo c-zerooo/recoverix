@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from dataclasses import asdict
-from typing import Dict, List, Optional, Any
+from dataclasses import asdict, dataclass
+from typing import Dict, List, Optional, Any, Tuple
 
 from backend.app.models.recovery_run import (
     RecoveryRun,
@@ -42,6 +42,89 @@ from backend.app.recovery.signatures import (
     PDF_TRAILER_SIGNATURE,
 )
 from backend.app.recovery.completeness import assess_artifact_completeness
+
+@dataclass(frozen=True)
+class CandidateEvidenceSpan:
+    """Represents the physical evidence span attributable to a candidate.
+
+    Distinguishes between:
+    - a candidate with a trustworthy/bounded physical end (evidence_end is int)
+    - a candidate with an unknown/unbounded end (evidence_end is None)
+    - the search window limit used for safe scanning without claiming ownership
+    """
+
+    evidence_start: int
+    evidence_end: Optional[int]
+    search_limit: int
+
+    @property
+    def is_bounded(self) -> bool:
+        """True if the candidate has a known, trustworthy physical end boundary."""
+        return self.evidence_end is not None
+
+    @property
+    def known_span_length(self) -> Optional[int]:
+        """Physical length if bounded, else None to preserve end uncertainty."""
+        if self.evidence_end is not None:
+            return max(0, self.evidence_end - self.evidence_start)
+        return None
+
+    def bound_verified_bytes(self, proposed_verified: int) -> int:
+        """Ensure verified bytes are strictly supported by the attributable evidence span.
+
+        Never permits an unbounded candidate to claim beyond attributable bytes,
+        and never permits verified bytes to exceed the search window.
+        """
+        if self.is_bounded:
+            max_allowed = max(0, (self.evidence_end or self.evidence_start) - self.evidence_start)
+            return min(proposed_verified, max_allowed)
+        max_window = max(0, self.search_limit - self.evidence_start)
+        return min(proposed_verified, max_window)
+
+    def compute_fragment_bounds(self, verified_bytes: int) -> Tuple[int, int]:
+        """Compute (length, end_offset) for Fragment model accounting.
+
+        For bounded candidates: uses the known physical boundary.
+        For unbounded candidates: strictly bounds the fragment to the verified bytes
+        (or 0 if unrecoverable), preserving end uncertainty without claiming the
+        remainder of the evidence buffer.
+        """
+        if self.is_bounded:
+            end = self.evidence_end if self.evidence_end is not None else self.evidence_start
+            return (end - self.evidence_start, end)
+        if verified_bytes > 0:
+            return (verified_bytes, self.evidence_start + verified_bytes)
+        return (0, self.evidence_start)
+
+
+def resolve_candidate_evidence_span(
+    content_len: int,
+    cand: Candidate,
+    next_offset: Optional[int] = None,
+) -> CandidateEvidenceSpan:
+    """Resolve physical evidence span and search limit for a candidate.
+
+    Enforces that an unknown candidate end (estimated_end_offset is None)
+    is preserved as None rather than silently becoming len(content).
+    When estimated_end_offset is known, limits search to the known boundary.
+    """
+    start = getattr(cand, "offset", 0)
+    end = getattr(cand, "estimated_end_offset", None)
+
+    if end is not None and end > start:
+        search_lim = min(end, content_len)
+        if next_offset is not None and next_offset > start:
+            search_lim = min(search_lim, next_offset)
+    elif next_offset is not None and next_offset > start:
+        search_lim = min(next_offset, content_len)
+    else:
+        search_lim = content_len
+
+    return CandidateEvidenceSpan(
+        evidence_start=start,
+        evidence_end=end,
+        search_limit=search_lim,
+    )
 
 
 
@@ -285,12 +368,13 @@ def _recover_contiguous_candidate(
     fmt = cand.format
     validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
 
-    frag_len = (cand.estimated_end_offset or len(content)) - cand.offset
+    span = resolve_candidate_evidence_span(len(content), cand)
+    frag_len, frag_end = span.compute_fragment_bounds(span.known_span_length or 0)
     frag0 = Fragment(
         fragment_id="frag-0",
         offset=cand.offset,
         length=frag_len,
-        end_offset=cand.estimated_end_offset or len(content),
+        end_offset=frag_end,
         status="VERIFIED",
         source="synthetic_boundary" if cand.detection_method == "synthetic_boundary" else "magic_bytes",
         format=fmt,
@@ -450,8 +534,8 @@ def _recover_contiguous_candidate(
         val_details_dict = {"error": str(e)}
 
     output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else carved_bytes
-    prov_dict["evidence_start"] = cand.offset
-    prov_dict["evidence_end"] = cand.estimated_end_offset
+    prov_dict["evidence_start"] = span.evidence_start
+    prov_dict["evidence_end"] = span.evidence_end
     prov_dict["coordinate_system"] = "physical_evidence_offsets"
     prov_dict["detection_method"] = cand.detection_method
     prov_dict["relationships"] = [
@@ -816,20 +900,22 @@ def _recover_standalone_candidate(
     fmt = cand.format
     validator = VALIDATORS.get(fmt, lambda data: validate_artifact(fmt, data))
 
-    bound_end = next_offset if (next_offset is not None and next_offset > cand.offset) else len(content)
-    raw_frag_len = bound_end - cand.offset
+    span = resolve_candidate_evidence_span(len(content), cand, next_offset)
+    search_end = span.search_limit
+    search_len = search_end - cand.offset
 
+    init_len, init_end = span.compute_fragment_bounds(0)
     frag0 = Fragment(
         fragment_id="frag-0",
         offset=cand.offset,
-        length=raw_frag_len,
-        end_offset=bound_end,
+        length=init_len,
+        end_offset=init_end,
         status="PARTIAL",
         source="magic_bytes" if cand.detection_method == "magic_bytes" else "synthetic_boundary",
         format=fmt,
-        verified_bytes=raw_frag_len,
+        verified_bytes=0,
         reconstructed_bytes=0,
-        missing_bytes=0,
+        missing_bytes=search_len,
         validation_status="UNTESTED",
     )
     fragments: List[Fragment] = [frag0]
@@ -839,21 +925,23 @@ def _recover_standalone_candidate(
     status_val: str = "UNRECOVERABLE"
     ver_bytes: int = 0
     rec_byte_cnt: int = 0
-    miss_bytes: int = raw_frag_len
+    miss_bytes: int = search_len
     score_breakdown_dict: Dict[str, Any] = {}
     val_details_dict: Dict[str, Any] = {}
     prov_dict: Dict[str, Any] = {}
     output_dict: Optional[Dict[str, Any]] = None
-    total_input_bytes: int = raw_frag_len
+    total_input_bytes: int = search_len
+    reconstruction_attempted: bool = False
 
     emit_event(
         "FRAGMENT_IDENTIFIED",
-        f"Identified candidate fragment frag-0 [{cand.offset}..{bound_end}] ({raw_frag_len} bytes)",
+        f"Identified candidate fragment frag-0 [{cand.offset}..{search_end}] ({search_len} bytes)",
         relevant_fragment_ids=["frag-0"],
     )
 
     if fmt in ("txt", "json"):
-        raw_bytes = content[cand.offset:bound_end]
+        reconstruction_attempted = True
+        raw_bytes = content[cand.offset:search_end]
         emit_event("RECONSTRUCTION_STARTED", f"Attempting deterministic {fmt.upper()} format reconstruction")
         recon_res = reconstruct_artifact(fmt, raw_bytes)
         emit_event(
@@ -861,7 +949,7 @@ def _recover_standalone_candidate(
             f"{fmt.upper()} reconstruction completed with status '{recon_res.status}'",
         )
         status_val = recon_res.status
-        ver_bytes = recon_res.verified_bytes
+        ver_bytes = span.bound_verified_bytes(recon_res.verified_bytes)
         rec_byte_cnt = recon_res.reconstructed_bytes
         miss_bytes = recon_res.missing_bytes
         val_res = recon_res.validation_result or validator(raw_bytes)
@@ -918,6 +1006,7 @@ def _recover_standalone_candidate(
             )
 
     elif fmt == "pdf":
+        reconstruction_attempted = True
         raw_bytes = content[cand.offset:]
         val_initial = validator(raw_bytes)
 
@@ -1024,8 +1113,8 @@ def _recover_standalone_candidate(
             dam0 = DamageRegion(
                 region_id="damage-0",
                 start_offset=cand.offset,
-                end_offset=bound_end,
-                length=raw_frag_len,
+                end_offset=search_end,
+                length=search_len,
                 type="CORRUPTED",
                 status="RECONSTRUCTABLE",
                 affected_fragment_ids=["frag-0"],
@@ -1107,34 +1196,49 @@ def _recover_standalone_candidate(
                 prov_dict = asdict(eval_res.provenance)
                 output_dict = {"recovered_bytes": raw_bytes.hex()}
 
-    if not reconstruction_steps and status_val == "UNRECOVERABLE":
+    if not reconstruction_attempted and status_val == "UNRECOVERABLE":
         try:
-            raw_frag = content[cand.offset:bound_end]
+            raw_frag = content[cand.offset:search_end]
             emit_event("VALIDATION_STARTED", f"Validating format '{fmt}' on raw fragment")
             val_res = validator(raw_frag)
             val_status_str = "PASSED" if val_res.valid else "FAILED"
             emit_event("VALIDATION_COMPLETED", f"Validation {val_status_str}")
 
-            eval_res = evaluate_artifact_confidence(val_res, artifact=raw_frag)
-            emit_event(
-                "CONFIDENCE_CALCULATED",
-                f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
-            )
+            if val_res.valid:
+                eval_res = evaluate_artifact_confidence(val_res, artifact=raw_frag)
+                emit_event(
+                    "CONFIDENCE_CALCULATED",
+                    f"Confidence evaluated: total={eval_res.score_breakdown.total}/100, status={eval_res.status.value}",
+                )
 
-            status_val = eval_res.status.value
-            ver_bytes = eval_res.provenance.verified_bytes
-            rec_byte_cnt = eval_res.provenance.reconstructed_bytes
-            miss_bytes = eval_res.provenance.missing_bytes
-            score_breakdown_dict = asdict(eval_res.score_breakdown)
-            val_details_dict = asdict(val_res)
-            prov_dict = asdict(eval_res.provenance)
-            output_dict = {"recovered_bytes": raw_frag.hex()}
+                status_val = eval_res.status.value
+                ver_bytes = span.bound_verified_bytes(eval_res.provenance.verified_bytes)
+                rec_byte_cnt = eval_res.provenance.reconstructed_bytes
+                miss_bytes = eval_res.provenance.missing_bytes
+                score_breakdown_dict = asdict(eval_res.score_breakdown)
+                val_details_dict = asdict(val_res)
+                prov_dict = asdict(eval_res.provenance)
+                output_dict = {"recovered_bytes": raw_frag.hex()}
+            else:
+                status_val = "UNRECOVERABLE"
+                ver_bytes = 0
+                rec_byte_cnt = 0
+                miss_bytes = search_len
+                eval_res = evaluate_artifact_confidence(val_res, actual_verified_bytes=0, actual_missing_bytes=search_len)
+                score_breakdown_dict = asdict(eval_res.score_breakdown)
+                val_details_dict = asdict(val_res)
+                prov_dict = asdict(eval_res.provenance)
+                output_dict = {"recovered_bytes": ""}
         except Exception as e:
             val_details_dict = {"error": str(e)}
 
-    output_raw = bytes.fromhex(output_dict["recovered_bytes"]) if (output_dict and "recovered_bytes" in output_dict) else content[cand.offset:bound_end]
-    prov_dict["evidence_start"] = cand.offset
-    prov_dict["evidence_end"] = cand.estimated_end_offset
+    output_raw = (
+        bytes.fromhex(output_dict["recovered_bytes"])
+        if (output_dict and "recovered_bytes" in output_dict)
+        else b""
+    )
+    prov_dict["evidence_start"] = span.evidence_start
+    prov_dict["evidence_end"] = span.evidence_end
     prov_dict["coordinate_system"] = "physical_evidence_offsets"
     prov_dict["detection_method"] = cand.detection_method
     prov_dict["relationships"] = [
@@ -1149,6 +1253,25 @@ def _recover_standalone_candidate(
         prov_dict["candidate_cap_enforced"] = scan_meta.get("candidate_cap_enforced", False)
         prov_dict["total_discovered_candidates"] = scan_meta.get("total_discovered_candidates", 0)
         prov_dict["candidates_omitted"] = scan_meta.get("candidates_omitted", 0)
+
+    if len(fragments) == 1 and fragments[0].fragment_id == "frag-0":
+        final_len, final_end = span.compute_fragment_bounds(ver_bytes)
+        frag0_updated = frag0.model_copy(
+            update={
+                "length": final_len,
+                "end_offset": final_end,
+                "verified_bytes": ver_bytes,
+                "reconstructed_bytes": rec_byte_cnt,
+                "missing_bytes": miss_bytes,
+                "validation_status": val_status_str if "val_status_str" in locals() else "UNTESTED",
+                "status": (
+                    "VERIFIED"
+                    if status_val == "FULLY_RECOVERED"
+                    else ("UNRECOVERABLE" if status_val == "UNRECOVERABLE" else "PARTIAL")
+                ),
+            }
+        )
+        fragments[0] = frag0_updated
 
     return _finalize_recovery_run(
         run_id=run_id,

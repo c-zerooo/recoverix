@@ -177,11 +177,13 @@ def test_05_benchmark_results_are_deterministic():
     assert corr["status"]["expected"] == "CORRUPTED"
     assert corr["status"]["observed"] == "PARTIALLY_RECOVERED"
 
-    # Unrecoverable has status mismatch (expected UNRECOVERABLE vs observed CORRUPTED)
+    # Unrecoverable has status match and 0 verified bytes after 3.8.1 fix
     unrec = sc_map["art-unrecoverable-01"]
-    assert unrec["passed"] is False
+    assert unrec["passed"] is True
     assert unrec["status"]["expected"] == "UNRECOVERABLE"
-    assert unrec["status"]["observed"] == "CORRUPTED"
+    assert unrec["status"]["observed"] == "UNRECOVERABLE"
+    assert unrec["volumes"]["observed"]["verified"] == 0
+    assert len(unrec["false_recovery_violations"]) == 0
 
 
 def test_06_failed_metrics_are_surfaced_rather_than_suppressed():
@@ -189,14 +191,15 @@ def test_06_failed_metrics_are_surfaced_rather_than_suppressed():
     report = run_baseline_benchmark(seed=42, verbose=False)
 
     summary = report["summary"]
-    # The current engine fails 5 out of 6 scenarios; this must be reported honestly
-    assert summary["overall_passed"] is False
-    assert summary["scenarios_passed"] == 1
-    assert summary["scenarios_failed"] == 5
+    # EvaluationReport.passed reflects absence of forensic violations and false recoveries
+    assert summary["overall_passed"] is True
+    # Scenario-level weaknesses are surfaced accurately: 4 out of 6 scenarios fail
+    assert summary["scenarios_passed"] == 2
+    assert summary["scenarios_failed"] == 4
 
     # Check that failed status matches are explicitly recorded as False
     failed_scenarios = [sc for sc in report["scenarios"] if not sc["passed"]]
-    assert len(failed_scenarios) == 5
+    assert len(failed_scenarios) == 4
     for sc in failed_scenarios:
         assert sc["passed"] is False
         assert sc["status"]["match"] is False
@@ -237,11 +240,31 @@ def test_09_false_recovery_findings_propagate_into_report():
     """Verify that false-recovery violations from audit_false_recovery appear in the JSON report."""
     report = run_baseline_benchmark(seed=42, verbose=False)
 
-    violations = report["forensic_violations"]
-    assert len(violations) > 0
-    assert report["summary"]["total_forensic_violations"] == len(violations)
+    # In seed 42, milestone 3.8.1 successfully eliminated all false-recovery violations
+    assert len(report["forensic_violations"]) == 0
+    assert report["summary"]["total_forensic_violations"] == 0
 
-    # Check for specific expected violations
+    # Test that when violations do occur, they propagate accurately into report structure
+    from benchmark.evaluator import evaluate_scenario
+    gt_manifest, evidence_bytes = build_ground_truth_manifest(seed=42)
+    obs_manifest = run_pipeline_and_observe("damaged.img", evidence_bytes)
+
+    # Inject an overstated verification into one observed recovery to test violation propagation
+    tainted_recoveries = []
+    for r in obs_manifest.recoveries:
+        if r.observed_candidate_id == "cand-5":  # unrecoverable
+            tainted_recoveries.append(r.model_copy(update={
+                "total_verified_bytes": 524288,
+                "total_missing_bytes": 0,
+                "observed_status": "CORRUPTED",
+            }))
+        else:
+            tainted_recoveries.append(r)
+    tainted_manifest = obs_manifest.model_copy(update={"recoveries": tainted_recoveries})
+
+    eval_report = evaluate_scenario(gt_manifest, tainted_manifest)
+    violations = eval_report.forensic_violations
+    assert len(violations) > 0
     assert any("OVERSTATED_VERIFICATION" in v for v in violations)
     assert any("UNRECOVERABLE_MISCLASSIFIED" in v for v in violations)
     assert any("UNACCOUNTED_GAP" in v for v in violations)
