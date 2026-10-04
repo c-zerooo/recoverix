@@ -455,11 +455,14 @@ def _recover_contiguous_candidate(
             if (not is_complete or miss_bytes > 0 or rec_byte_cnt > 0) and status_val == "FULLY_RECOVERED":
                 status_val = "PARTIALLY_RECOVERED"
 
-            for idx_m, m in enumerate(recon_res.reconstruction_methods):
+                step_in_ids = [
+                    f"frag-{i}"
+                    for i in range(len(recon_res.details.get("physical_fragments", [])))
+                ] if (recon_res.details and "physical_fragments" in recon_res.details and len(recon_res.details["physical_fragments"]) > 1) else ["frag-0"]
                 step = ReconstructionStep(
                     step_id=f"step-{idx_m}",
                     method=m,
-                    input_fragment_ids=["frag-0"],
+                    input_fragment_ids=step_in_ids,
                     gap_start=None,
                     gap_end=None,
                     gap_size=None,
@@ -521,15 +524,45 @@ def _recover_contiguous_candidate(
             prov_dict = asdict(eval_res.provenance)
             output_dict = {"recovered_bytes": carved.recovered_bytes.hex()}
 
-        frag0_updated = frag0.model_copy(
-            update={
-                "verified_bytes": ver_bytes,
-                "reconstructed_bytes": rec_byte_cnt,
-                "missing_bytes": miss_bytes,
-                "validation_status": val_status_str,
-            }
-        )
-        fragments[0] = frag0_updated
+        if fmt in ("txt", "csv", "json") and recon_res.details and "physical_fragments" in recon_res.details:
+            phys_frags = recon_res.details["physical_fragments"]
+            if len(phys_frags) > 1:
+                fragments = [
+                    Fragment(
+                        fragment_id=f"frag-{i}",
+                        offset=p_off,
+                        length=p_len,
+                        end_offset=p_off + p_len,
+                        status="VERIFIED",
+                        source="synthetic_boundary" if cand.detection_method == "synthetic_boundary" else "carved",
+                        format=fmt,
+                        verified_bytes=p_len,
+                        reconstructed_bytes=0,
+                        missing_bytes=0,
+                        validation_status=val_status_str,
+                    )
+                    for i, (p_off, p_len) in enumerate(phys_frags)
+                ]
+            else:
+                frag0_updated = frag0.model_copy(
+                    update={
+                        "verified_bytes": ver_bytes,
+                        "reconstructed_bytes": rec_byte_cnt,
+                        "missing_bytes": miss_bytes,
+                        "validation_status": val_status_str,
+                    }
+                )
+                fragments[0] = frag0_updated
+        else:
+            frag0_updated = frag0.model_copy(
+                update={
+                    "verified_bytes": ver_bytes,
+                    "reconstructed_bytes": rec_byte_cnt,
+                    "missing_bytes": miss_bytes,
+                    "validation_status": val_status_str,
+                }
+            )
+            fragments[0] = frag0_updated
     except Exception as e:
         val_details_dict = {"error": str(e)}
 

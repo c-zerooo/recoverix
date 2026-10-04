@@ -75,13 +75,121 @@ from backend.app.recovery.reconstructors.txt import reconstruct_txt
 from backend.app.recovery.reconstructors.json import reconstruct_json
 
 
+def _try_stitch_fragmented_txt(
+    data: bytes,
+    source_offset: int = 0,
+    min_gap_size: int = 64,
+) -> Optional[Tuple[bytes, List[Tuple[int, int]], ValidationResult]]:
+    """Deterministically stitch fragmented text extents separated by unallocated null space.
+
+    Physical & structural invariants:
+      1. Candidate Window Alignment:
+         The evidence window contains multiple (>= 2) contiguous non-null extents.
+         The first extent MUST start at relative offset 0 of the candidate window.
+         The last extent MUST end at the end of the candidate window (len(data)).
+      2. Clean Unallocated Storage Blocks:
+         All intervening bytes between extents must be strictly zero-fill (\\x00).
+         Every gap must be >= min_gap_size (>= 64 bytes), representing Recoverix's deterministic
+         heuristic for unallocated storage blocks rather than intra-file null byte corruption.
+      3. Payload UTF-8 Integrity:
+         When extents are concatenated in physical storage order, the stitched stream
+         must be valid UTF-8 without decode errors.
+      4. Text Density:
+         The stitched text must consist predominantly (>= 90%) of printable text and
+         standard whitespace (\\t, \\r, \\n), rejecting binary noise or control bytes.
+      5. Structural Validation:
+         The stitched payload must pass format-level structural validation (validate_txt),
+         ensuring no binary nulls exist within the payload and valid document structure
+         is established.
+    """
+    d_len = len(data)
+    if d_len == 0:
+        return None
+
+    # 1. Extract contiguous non-null extents
+    segs: List[Tuple[int, int, bytes]] = []
+    idx = 0
+    while idx < d_len:
+        if data[idx] != 0:
+            start = idx
+            while idx < d_len and data[idx] != 0:
+                idx += 1
+            segs.append((start, idx, data[start:idx]))
+        else:
+            idx += 1
+
+    # 2. Must contain at least 2 extents to be fragmented
+    if len(segs) < 2:
+        return None
+
+    # 3. Spatial candidate window boundary alignment
+    if segs[0][0] != 0 or segs[-1][1] != d_len:
+        return None
+
+    # 4. Validate that all inter-extent gaps are pure unallocated blocks
+    for i in range(len(segs) - 1):
+        gap = data[segs[i][1] : segs[i + 1][0]]
+        if len(gap) < min_gap_size:
+            return None  # Small intra-file gap, treated as payload damage
+        if any(b != 0 for b in gap):
+            return None  # Gap contains non-zero noise/entropy
+
+    # 5. Concatenate in forward physical order & verify UTF-8
+    stitched = b"".join(chunk for _, _, chunk in segs)
+    try:
+        text = stitched.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    # 6. Verify printable text density (>= 90%)
+    printable_count = sum(1 for ch in text if ch.isprintable() or ch in "\t\r\n")
+    if (printable_count / len(text)) < 0.90:
+        return None
+
+    # 7. Structural text validation via canonical validator
+    val_res = validate_txt(stitched)
+    if not val_res.valid:
+        return None
+
+    frags = [(source_offset + s, len(chunk)) for s, e, chunk in segs]
+    return stitched, frags, val_res
+
+
 def reconstruct_text(
     data: bytes,
     original_data: Optional[bytes] = None,
     detection_mode: str = "known_file",
+    source_offset: int = 0,
 ) -> ReconstructionResult:
     """Deterministically reconstruct damaged TXT evidence into a valid TXT file."""
     data = bytes(data)
+
+    stitched_result = _try_stitch_fragmented_txt(data, source_offset=source_offset)
+    if stitched_result is not None:
+        stitched, frags, val_res = stitched_result
+        is_exact = None
+        if original_data is not None:
+            is_exact = hashlib.sha256(stitched).digest() == hashlib.sha256(original_data).digest()
+        return ReconstructionResult(
+            format="txt",
+            status="FULLY_RECOVERED",
+            success=True,
+            recovered_bytes=stitched,
+            verified_bytes=len(stitched),
+            reconstructed_bytes=0,
+            missing_bytes=0,
+            damage_regions=[],
+            reconstruction_methods=["FRAGMENTED_EXTENT_STITCHING"],
+            validation_result=val_res,
+            is_exact_match=is_exact,
+            details={
+                "reconstruction_method": "FRAGMENTED_EXTENT_STITCHING",
+                "physical_fragments": frags,
+                "fragment_count": len(frags),
+                "total_verified_bytes": len(stitched),
+                "unallocated_gap_bytes": len(data) - len(stitched),
+            },
+        )
 
     # Binary garbage is not text. Salvaging it as "recovered text" would fabricate
     # content and overstate confidence, so it is reported unrecoverable with every
@@ -712,11 +820,17 @@ def reconstruct_artifact(
         ReconstructionResult with usable recovered bytes and byte accounting.
     """
     clean_fmt = fmt.lower().strip(".")
+    source_offset = data.source_offset if isinstance(data, RecoveredArtifact) else 0
     if isinstance(data, RecoveredArtifact):
         data = data.recovered_bytes
     if clean_fmt == "txt":
         # reconstruct_text rejects predominantly binary evidence as unrecoverable.
-        return reconstruct_text(data, original_data=original_data, detection_mode=detection_mode)
+        return reconstruct_text(
+            data,
+            original_data=original_data,
+            detection_mode=detection_mode,
+            source_offset=source_offset,
+        )
     elif clean_fmt == "csv":
         return reconstruct_csv(data, original_data=original_data, detection_mode=detection_mode)
     elif clean_fmt == "json":
