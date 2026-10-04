@@ -179,9 +179,12 @@ def test_09_bifragment_and_corrupted_remain_untouched():
     report = evaluate_scenario(gt_manifest, obs_manifest)
 
     bifrag_eval = next(ae for ae in report.artifact_evaluations if ae.artifact_id == "art-bifragment-01")
-    # Bifragment remains failing as expected (gap contains random binary data)
-    assert bifrag_eval.status_match is False
-    assert bifrag_eval.observed_status != "FULLY_RECOVERED"
+    # Bifragment remains unrecovered by production engine (gap contains random binary data)
+    # Under 3.8.4 non-deterministic modeling, expected is UNRECOVERABLE and matches observed UNRECOVERABLE
+    assert bifrag_eval.expected_status == "UNRECOVERABLE"
+    assert bifrag_eval.observed_status == "UNRECOVERABLE"
+    assert bifrag_eval.status_match is True
+    assert bifrag_eval.false_fully_recovered is False
 
     corr_eval = next(ae for ae in report.artifact_evaluations if ae.artifact_id == "art-corrupted-01")
     # Corrupted remains failing as expected
