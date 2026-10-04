@@ -193,8 +193,87 @@ def reconstruct_csv(
     has_synthetic_end = SYNTHETIC_END_MARKER in data
     uses_synthetic_markers = has_synthetic_start or has_synthetic_end
 
+    # Fast-path for intact, complete, valid CSV evidence:
+    # Preserve original evidence byte-for-byte without destructive re-serialization.
+    if b"\x00" not in data:
+        val_initial = validate_csv(data)
+        if val_initial.valid and not val_initial.errors:
+            intact_body: Optional[bytes] = None
+            if uses_synthetic_markers:
+                if (
+                    has_synthetic_start
+                    and has_synthetic_end
+                    and data.count(SYNTHETIC_START_MARKER) == 1
+                    and data.count(SYNTHETIC_END_MARKER) == 1
+                    and data.startswith(SYNTHETIC_START_MARKER)
+                    and data.endswith(SYNTHETIC_END_MARKER)
+                ):
+                    intact_body = data[len(SYNTHETIC_START_MARKER) : -len(SYNTHETIC_END_MARKER)]
+            else:
+                intact_body = data
+
+            if intact_body is not None:
+                try:
+                    intact_text = intact_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    intact_text = None
+
+                if intact_text is not None and (intact_body.endswith(b"\n") or intact_body.endswith(b"\r\n")):
+                    intact_lines = [line for line in intact_text.splitlines() if line.strip()]
+                    if len(intact_lines) >= 2 and sum(l.count('"') for l in intact_lines) % 2 == 0:
+                        for test_delim in (",", ";", "\t", "|"):
+                            try:
+                                reader = csv.reader(io.StringIO("\n".join(intact_lines)), delimiter=test_delim)
+                                parsed = list(reader)
+                                if (
+                                    len(parsed) == len(intact_lines)
+                                    and len(set(len(r) for r in parsed)) == 1
+                                    and len(parsed[0]) >= 2
+                                ):
+                                    from backend.app.recovery.completeness import assess_artifact_completeness
+
+                                    eff_mode = "synthetic_harness" if uses_synthetic_markers else detection_mode
+                                    is_complete = assess_artifact_completeness(
+                                        fmt="csv",
+                                        content=data,
+                                        detection_mode=eff_mode,
+                                        validation_result=val_initial,
+                                        missing_bytes=0,
+                                        reconstructed_bytes=0,
+                                    )
+                                    status_str = "FULLY_RECOVERED" if is_complete else "PARTIALLY_RECOVERED"
+                                    is_exact = None
+                                    if original_data is not None:
+                                        is_exact = (
+                                            hashlib.sha256(data).digest() == hashlib.sha256(original_data).digest()
+                                        )
+
+                                    return ReconstructionResult(
+                                        format="csv",
+                                        status=status_str,
+                                        success=True,
+                                        recovered_bytes=data,
+                                        verified_bytes=len(data),
+                                        reconstructed_bytes=0,
+                                        missing_bytes=0,
+                                        damage_regions=[],
+                                        reconstruction_methods=[],
+                                        validation_result=val_initial,
+                                        is_exact_match=is_exact,
+                                        details={
+                                            "reason": "Intact CSV evidence preserved byte-for-byte",
+                                            "is_complete": is_complete,
+                                            "row_count": len(parsed),
+                                            "column_count": len(parsed[0]),
+                                            "delimiter": test_delim,
+                                        },
+                                    )
+                            except Exception:
+                                pass
+
     raw_body: bytes
     body_offset = 0
+    leading_prefix = b""
 
     if uses_synthetic_markers:
         start_idx = data.find(SYNTHETIC_START_MARKER)
@@ -204,6 +283,10 @@ def reconstruct_csv(
             body_start = start_idx + len(SYNTHETIC_START_MARKER)
             raw_body = data[body_start:end_idx]
             body_offset = body_start
+            if raw_body.startswith(b"\r\n"):
+                leading_prefix = b"\r\n"
+            elif raw_body.startswith(b"\n"):
+                leading_prefix = b"\n"
         elif start_idx != -1:
             body_start = start_idx + len(SYNTHETIC_START_MARKER)
             raw_body = data[body_start:]
@@ -465,6 +548,14 @@ def reconstruct_csv(
             })
             reconstruction_methods.append("INCONSISTENT_ROW_DROPPED")
 
+    if uses_synthetic_markers:
+        struct_verified_bytes = (
+            (len(SYNTHETIC_START_MARKER) if has_synthetic_start else 0)
+            + len(leading_prefix)
+            + (len(SYNTHETIC_END_MARKER) if has_synthetic_end else 0)
+        )
+        surviving_input_bytes += struct_verified_bytes
+
     # Require at least 2 valid rows unless file only had 1 intact row
     if len(valid_rows) < 2 and len(valid_rows) < len(parsed_rows):
         val_res = validate_csv(data)
@@ -516,7 +607,7 @@ def reconstruct_csv(
 
     # Wrap in synthetic markers if used
     if uses_synthetic_markers:
-        out_buf = SYNTHETIC_START_MARKER + recovered_body + SYNTHETIC_END_MARKER
+        out_buf = SYNTHETIC_START_MARKER + leading_prefix + recovered_body + SYNTHETIC_END_MARKER
         if not has_synthetic_start:
             reconstructed_bytes_count += len(SYNTHETIC_START_MARKER)
         if not has_synthetic_end:

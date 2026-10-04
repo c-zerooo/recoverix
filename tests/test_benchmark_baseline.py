@@ -119,7 +119,7 @@ def test_04_coordinate_spaces_remain_distinct():
 
     # In evidence space, fragment is at evidence offset 65536
     assert seg.evidence_start == 65536
-    assert seg.evidence_end == 65536 + 164
+    assert seg.evidence_end == 65536 + 215
 
     # Original artifact space is NOT known by the recovery engine and MUST be None
     assert seg.original_start is None
@@ -127,7 +127,7 @@ def test_04_coordinate_spaces_remain_distinct():
 
     # In recovered payload space, fragment starts at 0 or None if unmapped
     assert seg.recovered_start == 0
-    assert seg.recovered_end == 164
+    assert seg.recovered_end == 215
 
     # Assert coordinate spaces are not conflated
     assert seg.evidence_start != seg.recovered_start
@@ -153,11 +153,13 @@ def test_05_benchmark_results_are_deterministic():
     assert clean["status"]["observed"] == "FULLY_RECOVERED"
     assert clean["volumes"]["accuracy"]["verified"] == 1.0
 
-    # Deleted fails due to partial recovery and CSV parsing shift
+    # Deleted passes fully after Milestone 3.8.2 payload preservation fix
     deleted = sc_map["art-deleted-01"]
-    assert deleted["passed"] is False
+    assert deleted["passed"] is True
     assert deleted["status"]["expected"] == "FULLY_RECOVERED"
-    assert deleted["status"]["observed"] == "PARTIALLY_RECOVERED"
+    assert deleted["status"]["observed"] == "FULLY_RECOVERED"
+    assert deleted["volumes"]["accuracy"]["verified"] == 1.0
+    assert deleted["whole_payload_hash_match"] is True
 
     # Fragmented is unrecovered
     frag = sc_map["art-fragmented-01"]
@@ -193,13 +195,13 @@ def test_06_failed_metrics_are_surfaced_rather_than_suppressed():
     summary = report["summary"]
     # EvaluationReport.passed reflects absence of forensic violations and false recoveries
     assert summary["overall_passed"] is True
-    # Scenario-level weaknesses are surfaced accurately: 4 out of 6 scenarios fail
-    assert summary["scenarios_passed"] == 2
-    assert summary["scenarios_failed"] == 4
+    # Scenario-level weaknesses are surfaced accurately: 3 out of 6 scenarios fail
+    assert summary["scenarios_passed"] == 3
+    assert summary["scenarios_failed"] == 3
 
     # Check that failed status matches are explicitly recorded as False
     failed_scenarios = [sc for sc in report["scenarios"] if not sc["passed"]]
-    assert len(failed_scenarios) == 4
+    assert len(failed_scenarios) == 3
     for sc in failed_scenarios:
         assert sc["passed"] is False
         assert sc["status"]["match"] is False

@@ -69,7 +69,7 @@ def assess_artifact_completeness(
     clean_fmt = fmt.lower().strip(".")
 
     # Mode 1: Synthetic Harness
-    if detection_mode == "synthetic_harness":
+    if detection_mode == "synthetic_harness" or (SYNTHETIC_START_MARKER in content and SYNTHETIC_END_MARKER in content):
         has_start = SYNTHETIC_START_MARKER in content
         has_end = SYNTHETIC_END_MARKER in content
         if not (has_start and has_end):
@@ -136,13 +136,22 @@ def assess_artifact_completeness(
             return False
 
         # Verify delimiter and consistent column count
+        import csv
+        import io
+
         delims = [",", ";", "\t", "|"]
         valid_delim = None
         for delim in delims:
-            counts = [len(line.split(delim)) for line in lines]
-            if all(c > 1 for c in counts) and len(set(counts)) == 1:
-                valid_delim = delim
-                break
+            try:
+                reader = csv.reader(io.StringIO("\n".join(lines)), delimiter=delim)
+                rows = list(reader)
+                if len(rows) == len(lines):
+                    counts = [len(r) for r in rows]
+                    if all(c > 1 for c in counts) and len(set(counts)) == 1:
+                        valid_delim = delim
+                        break
+            except Exception:
+                pass
 
         return valid_delim is not None
 
