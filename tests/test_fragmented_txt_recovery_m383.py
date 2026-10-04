@@ -187,9 +187,10 @@ def test_09_bifragment_and_corrupted_remain_untouched():
     assert bifrag_eval.false_fully_recovered is False
 
     corr_eval = next(ae for ae in report.artifact_evaluations if ae.artifact_id == "art-corrupted-01")
-    # Corrupted remains failing as expected
-    assert corr_eval.status_match is False
+    # Under 3.8.5, corrupted TXT classification is fixed: expected is CORRUPTED and matches observed CORRUPTED
     assert corr_eval.expected_status == "CORRUPTED"
+    assert corr_eval.observed_status == "CORRUPTED"
+    assert corr_eval.status_match is True
 
 
 def test_10_zero_oracle_leakage_and_vrm_accounting():

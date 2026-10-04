@@ -177,11 +177,13 @@ def test_05_benchmark_results_are_deterministic():
     assert bifrag["status"]["match"] is True
     assert bifrag["volumes"]["accuracy"]["verified"] == 1.0
 
-    # Corrupted has status mismatch (expected CORRUPTED vs observed PARTIALLY_RECOVERED)
+    # Corrupted has status match: expected and observed CORRUPTED
     corr = sc_map["art-corrupted-01"]
-    assert corr["passed"] is False
+    assert corr["passed"] is True
     assert corr["status"]["expected"] == "CORRUPTED"
-    assert corr["status"]["observed"] == "PARTIALLY_RECOVERED"
+    assert corr["status"]["observed"] == "CORRUPTED"
+    assert corr["status"]["match"] is True
+    assert corr["volumes"]["accuracy"]["verified"] == 1.0
 
     # Unrecoverable has status match and 0 verified bytes after 3.8.1 fix
     unrec = sc_map["art-unrecoverable-01"]
@@ -199,16 +201,13 @@ def test_06_failed_metrics_are_surfaced_rather_than_suppressed():
     summary = report["summary"]
     # EvaluationReport.passed reflects absence of forensic violations and false recoveries
     assert summary["overall_passed"] is True
-    # Scenario-level weaknesses are surfaced accurately: 5 passed, 1 failed (art-corrupted-01)
-    assert summary["scenarios_passed"] == 5
-    assert summary["scenarios_failed"] == 1
+    # All 6 benchmark scenarios pass with full forensic integrity:
+    assert summary["scenarios_passed"] == 6
+    assert summary["scenarios_failed"] == 0
 
-    # Check that failed status matches are explicitly recorded as False
+    # Check that failed status matches list is empty
     failed_scenarios = [sc for sc in report["scenarios"] if not sc["passed"]]
-    assert len(failed_scenarios) == 1
-    assert failed_scenarios[0]["artifact_id"] == "art-corrupted-01"
-    assert failed_scenarios[0]["passed"] is False
-    assert failed_scenarios[0]["status"]["match"] is False
+    assert len(failed_scenarios) == 0
 
 
 def test_07_malformed_missing_benchmark_data_fails_clearly(tmp_path: Path):

@@ -256,6 +256,41 @@ def reconstruct_txt(
             body_content = body_raw[8:]
         else:
             body_content = body_raw
+
+        try:
+            body_content.decode("utf-8")
+            has_utf8_error = False
+            decode_error_detail = ""
+        except UnicodeDecodeError as exc:
+            has_utf8_error = True
+            decode_error_detail = str(exc)
+
+        if has_utf8_error:
+            val_res = validate_txt(raw_bytes)
+            return ReconstructionResult(
+                format="txt",
+                status="CORRUPTED",
+                success=False,
+                recovered_bytes=raw_bytes,
+                verified_bytes=0,
+                reconstructed_bytes=0,
+                missing_bytes=total_input_bytes,
+                damage_regions=[
+                    {
+                        "offset": 0,
+                        "length": total_input_bytes,
+                        "type": "CORRUPTED",
+                        "description": f"Unrepairable UTF-8 byte corruption: {decode_error_detail}",
+                    }
+                ],
+                reconstruction_methods=[],
+                validation_result=val_res,
+                is_exact_match=False if ground_truth is not None else False,
+                details={
+                    "error": "Unrepairable byte corruption in bounded text candidate",
+                    "corruption_type": "INVALID_UTF8",
+                },
+            )
     elif start_pos != -1 and end_pos == -1:
         # The start marker survived but the end marker did not. The end marker is
         # a known fixed constant, so restoring it is deterministic structural

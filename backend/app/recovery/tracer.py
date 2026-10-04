@@ -546,6 +546,7 @@ def _recover_contiguous_candidate(
             else:
                 frag0_updated = frag0.model_copy(
                     update={
+                        "status": "CORRUPTED" if status_val == "CORRUPTED" else frag0.status,
                         "verified_bytes": ver_bytes,
                         "reconstructed_bytes": rec_byte_cnt,
                         "missing_bytes": miss_bytes,
@@ -556,6 +557,7 @@ def _recover_contiguous_candidate(
         else:
             frag0_updated = frag0.model_copy(
                 update={
+                    "status": "CORRUPTED" if status_val == "CORRUPTED" else frag0.status,
                     "verified_bytes": ver_bytes,
                     "reconstructed_bytes": rec_byte_cnt,
                     "missing_bytes": miss_bytes,
