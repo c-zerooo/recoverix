@@ -192,6 +192,9 @@ class PhysicalArtifactRecord(BaseModel):
     is_unrecoverable: bool = False
     unrecoverable_reason: Optional[str] = None
 
+    is_deterministic_recovery: bool = True
+    non_deterministic_reason: Optional[str] = None
+
     @field_validator("original_sha256")
     @classmethod
     def validate_sha256(cls, v: str) -> str:

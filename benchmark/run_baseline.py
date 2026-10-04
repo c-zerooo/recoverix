@@ -197,6 +197,8 @@ def build_ground_truth_manifest(
             PhysicalPlacement(fragment_index=1, evidence_offset=330569, evidence_length=142, original_offset=142),
         ],
         damage_intervals=[],
+        is_deterministic_recovery=False,
+        non_deterministic_reason="INTERLEAVED_RANDOM_NOISE_UNSTRUCTURED_TXT",
     )
 
     # 5. Corrupted (243 bytes, 32 bytes random overwrite at offset 60)

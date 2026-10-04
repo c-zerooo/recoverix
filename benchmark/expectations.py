@@ -110,7 +110,20 @@ def derive_expected_recovery(artifact: PhysicalArtifactRecord) -> DerivedExpecta
     total_verified = sum(end - start for start, end in surviving_intervals)
 
     # 4. Apply Mutually Exclusive Status Truth Table
-    if not artifact.damage_intervals:
+    if not artifact.is_deterministic_recovery:
+        return DerivedExpectation(
+            artifact_id=artifact.artifact_id,
+            expected_status="UNRECOVERABLE",
+            expected_verified_bytes=0,
+            expected_reconstructed_bytes=0,
+            expected_missing_bytes=orig_size,
+            expected_surviving_intervals=[],
+            expected_missing_intervals=[(0, orig_size)],
+            expected_reconstructed_intervals=[],
+            expected_corrupted_intervals=[],
+            forensic_classification_rule="AMBIGUOUS_PHYSICAL_LAYOUT",
+        )
+    elif not artifact.damage_intervals:
         # Rule 1: INTACT
         status: ExpectedStatus = "FULLY_RECOVERED"
         rule_name = "INTACT"
