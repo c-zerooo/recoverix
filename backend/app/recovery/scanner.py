@@ -41,6 +41,7 @@ confidence scoring, classification, or AI work.
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
@@ -555,34 +556,126 @@ def _scan_jpeg(
 
 
 
+PDF_VERSIONED_HEADER_RE = re.compile(rb"%PDF-[0-9]\.[0-9](?:\r\n|\n\r|\r|\n)")
+
+
+def _is_inside_unclosed_stream(data: bytes, base_offset: int, target_pos: int) -> bool:
+    """Check if target_pos lies inside an unclosed stream block originating after base_offset."""
+    stream_matches = list(re.finditer(rb"\bstream\r?\n", data[base_offset:target_pos]))
+    if not stream_matches:
+        return False
+    last_stream_end = base_offset + stream_matches[-1].end()
+    return data.find(b"endstream", last_stream_end, target_pos) == -1
+
+
+def _is_inside_unclosed_object(data: bytes, base_offset: int, target_pos: int) -> bool:
+    """Check if target_pos lies inside an unclosed indirect object block originating after base_offset."""
+    obj_matches = list(re.finditer(rb"\b\d+\s+\d+\s+obj\b", data[base_offset:target_pos]))
+    if not obj_matches:
+        return False
+    last_obj_end = base_offset + obj_matches[-1].end()
+    return data.find(b"endobj", last_obj_end, target_pos) == -1
+
+
+def _verify_trailer_matches_candidate(data: bytes, cand_start: int, eof_pos: int) -> bool:
+    """Verify if the trailer at eof_pos belongs to cand_start via startxref pointer to xref."""
+    window = data[max(cand_start, eof_pos - 128):eof_pos + 20]
+    m = re.search(rb"startxref\s+(\d+)\s+%%EOF", window)
+    if not m:
+        return True
+    reported_offset = int(m.group(1))
+    target = cand_start + reported_offset
+    if target + 4 > len(data):
+        return False
+    target_slice = data[target:target + 10]
+    return target_slice.startswith(b"xref") or b"obj" in target_slice or b"/XRef" in target_slice
+
+
 def _scan_pdf(
     data: bytes,
     evidence_len: int,
     candidates: List[Candidate],
 ) -> None:
-    """Find all PDF header signatures in *data*."""
+    """Find all structurally qualified PDF candidates using stream/object filtering and territory scoping."""
     sig = PDF_HEADER_SIGNATURE
     sig_len = len(sig)
 
-    search_from = 0
+    # 1. Discover all candidate start positions (%PDF-[0-9].[0-9] followed by EOL marker)
+    raw_starts = [m.start() for m in PDF_VERSIONED_HEADER_RE.finditer(data[:evidence_len])]
+    if not raw_starts:
+        return
 
-    while search_from <= evidence_len - sig_len:
-        pos = data.find(sig, search_from)
-        if pos == -1:
+    # Filter ghost headers residing inside active streams or active indirect objects
+    filtered_starts: List[int] = []
+    for pos in raw_starts:
+        if not filtered_starts:
+            filtered_starts.append(pos)
+            continue
+        last_start = filtered_starts[-1]
+        if _is_inside_unclosed_stream(data, last_start, pos):
+            continue
+        if _is_inside_unclosed_object(data, last_start, pos):
+            continue
+        filtered_starts.append(pos)
+
+    # 2. Sequential candidate discovery and territory-scoped trailer search
+    valid_cands: List[Candidate] = []
+    curr_i = 0
+    while curr_i < len(filtered_starts):
+        pos = filtered_starts[curr_i]
+
+        # If this position falls inside the completed bounds of a preceding valid candidate, skip it
+        if valid_cands and valid_cands[-1].estimated_end_offset is not None:
+            if pos < valid_cands[-1].estimated_end_offset:
+                curr_i += 1
+                continue
+
+        search_start = pos + sig_len
+        next_cand_start = None
+        for future_start in filtered_starts[curr_i + 1:]:
+            next_cand_start = future_start
             break
 
-        # Check for %%EOF marker after header to estimate end
-        eof_pos = data.rfind(PDF_TRAILER_SIGNATURE, pos + sig_len)
-        if eof_pos != -1:
-            estimated_end = eof_pos + len(PDF_TRAILER_SIGNATURE)
-            if estimated_end + 1 <= evidence_len and data[estimated_end:estimated_end + 2] in (b"\r\n", b"\n\r"):
-                estimated_end += 2
-            elif estimated_end < evidence_len and data[estimated_end:estimated_end + 1] in (b"\n", b"\r"):
-                estimated_end += 1
-        else:
-            estimated_end = None
+        end_of_territory = next_cand_start if next_cand_start is not None else evidence_len
 
-        candidates.append(
+        # Search for %%EOF within [search_start : end_of_territory]
+        estimated_end: Optional[int] = None
+        curr_search_end = end_of_territory
+        while curr_search_end > search_start:
+            eof_pos = data.rfind(PDF_TRAILER_SIGNATURE, search_start, curr_search_end)
+            if eof_pos == -1:
+                break
+            if not _is_inside_unclosed_stream(data, pos, eof_pos):
+                if _verify_trailer_matches_candidate(data, pos, eof_pos):
+                    end_pos = eof_pos + len(PDF_TRAILER_SIGNATURE)
+                    if end_pos + 2 <= end_of_territory and data[end_pos:end_pos + 2] in (b"\r\n", b"\n\r"):
+                        end_pos += 2
+                    elif end_pos + 1 <= end_of_territory and data[end_pos:end_pos + 1] in (b"\n", b"\r"):
+                        end_pos += 1
+                    estimated_end = min(end_pos, end_of_territory)
+                    break
+            curr_search_end = eof_pos
+
+        # If no trailer was found within initial territory and there is a next_cand_start,
+        # verify if next_cand_start was actually a false start inside this document
+        if estimated_end is None and next_cand_start is not None:
+            extended_search_end = evidence_len
+            while extended_search_end > next_cand_start:
+                eof_pos = data.rfind(PDF_TRAILER_SIGNATURE, next_cand_start, extended_search_end)
+                if eof_pos == -1:
+                    break
+                if not _is_inside_unclosed_stream(data, pos, eof_pos):
+                    if _verify_trailer_matches_candidate(data, pos, eof_pos):
+                        end_pos = eof_pos + len(PDF_TRAILER_SIGNATURE)
+                        if end_pos + 2 <= evidence_len and data[end_pos:end_pos + 2] in (b"\r\n", b"\n\r"):
+                            end_pos += 2
+                        elif end_pos + 1 <= evidence_len and data[end_pos:end_pos + 1] in (b"\n", b"\r"):
+                            end_pos += 1
+                        estimated_end = end_pos
+                        break
+                extended_search_end = eof_pos
+
+        valid_cands.append(
             Candidate(
                 candidate_id="",
                 format="pdf",
@@ -594,8 +687,9 @@ def _scan_pdf(
                 detection_method="magic_bytes",
             )
         )
+        curr_i += 1
 
-        search_from = pos + sig_len
+    candidates.extend(valid_cands)
 
 
 def _find_xml_closing_boundary(
