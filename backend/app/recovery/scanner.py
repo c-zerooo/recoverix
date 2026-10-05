@@ -181,8 +181,9 @@ def _classify_synthetic_content(body: bytes) -> tuple[str, str, str]:
 # ── Scanner ─────────────────────────────────────────────────────────
 
 _METHOD_PRIORITY = {
-    "synthetic_boundary": 5,
-    "magic_bytes": 4,
+    "synthetic_boundary": 6,
+    "magic_bytes": 5,
+    "syntax_boundary": 4,
     "direct_header": 3,
     "heuristic_json_container": 2,
     "heuristic_text_run": 1,
@@ -768,7 +769,7 @@ def _find_xml_closing_boundary(
             else:
                 return None
         else:
-            i += 1
+            return None
 
     if not root_tag:
         return None
@@ -793,7 +794,7 @@ def _find_xml_closing_boundary(
             break
         i += 1
     else:
-        return None
+        return -1
 
     in_quote = None
     in_tag = False
@@ -806,13 +807,13 @@ def _find_xml_closing_boundary(
             if data.startswith(b"<!--", i):
                 c_end = data.find(b"-->", i + 4)
                 if c_end == -1:
-                    return None
+                    return -1
                 i = c_end + 3
                 continue
             if data.startswith(b"<![CDATA[", i):
                 cd_end = data.find(b"]]>", i + 9)
                 if cd_end == -1:
-                    return None
+                    return -1
                 i = cd_end + 3
                 continue
             if data.startswith(closing_target, i):
@@ -852,7 +853,7 @@ def _find_xml_closing_boundary(
                             break
                         k += 1
                     else:
-                        return None
+                        return -1
 
                     if not is_self_closing:
                         root_depth += 1
@@ -880,7 +881,7 @@ def _find_xml_closing_boundary(
                 continue
             i += 1
 
-    return None
+    return -1
 
 
 def _scan_xml(
@@ -899,7 +900,8 @@ def _scan_xml(
         if pos == -1:
             break
 
-        estimated_end = _find_xml_closing_boundary(data, pos)
+        boundary_res = _find_xml_closing_boundary(data, pos)
+        estimated_end = boundary_res if (boundary_res is not None and boundary_res != -1) else None
 
         candidates.append(
             Candidate(
@@ -935,6 +937,8 @@ def _scan_string(text: str, i: int) -> Tuple[int, str]:
     j = i + 1
     while j < n:
         c = text[j]
+        if c in "\r\n\x00":
+            return j, "unterminated"
         if c == "\\":
             if j + 1 >= n:
                 return n, "unterminated"
@@ -1018,12 +1022,13 @@ def _find_json_container_extent(
     i += 1
     state = "key" if opener == "{" else "value"
     has_content = False
+    last_valid_i = i
 
     while i < len(text) and len(stack) <= max_depth:
         if state == "value":
             i = _skip_ws(text, i)
             if i >= len(text):
-                return None, False, has_content
+                return last_valid_i, False, has_content
             c = text[i]
             if c == "{":
                 stack.append("{")
@@ -1040,6 +1045,7 @@ def _find_json_container_extent(
             if c == "]" and stack[-1] == "[":
                 i += 1
                 stack.pop()
+                last_valid_i = i
                 if not stack:
                     return i, True, False
                 state = "sep"
@@ -1047,26 +1053,29 @@ def _find_json_container_extent(
             if c == '"':
                 i, st = _scan_string(text, i)
                 if st != "ok":
-                    return None, False, has_content
+                    return i, False, has_content
                 has_content = True
+                last_valid_i = i
                 state = "sep"
                 continue
             if c in "tfn":
                 i, st = _scan_literal(text, i)
                 if st == "incomplete":
-                    return None, False, has_content
+                    return i, False, has_content
                 if st != "ok":
                     return None, False, False
                 has_content = True
+                last_valid_i = i
                 state = "sep"
                 continue
             if c == "-" or c.isdigit():
                 i, st = _scan_number(text, i)
                 if st == "incomplete":
-                    return None, False, has_content
+                    return i, False, has_content
                 if st != "ok":
                     return None, False, False
                 has_content = True
+                last_valid_i = i
                 state = "sep"
                 continue
             return None, False, False
@@ -1074,10 +1083,11 @@ def _find_json_container_extent(
         if state == "key":
             i = _skip_ws(text, i)
             if i >= len(text):
-                return None, False, has_content
+                return last_valid_i, False, has_content
             if text[i] == "}" and stack[-1] == "{":
                 i += 1
                 stack.pop()
+                last_valid_i = i
                 if not stack:
                     return i, True, False
                 state = "sep"
@@ -1086,7 +1096,7 @@ def _find_json_container_extent(
                 return None, False, False
             i, st = _scan_string(text, i)
             if st != "ok":
-                return None, False, has_content
+                return i, False, has_content
             has_content = True
             state = "colon"
             continue
@@ -1094,7 +1104,7 @@ def _find_json_container_extent(
         if state == "colon":
             i = _skip_ws(text, i)
             if i >= len(text):
-                return None, False, has_content
+                return last_valid_i, False, has_content
             if text[i] != ":":
                 return None, False, False
             i += 1
@@ -1104,9 +1114,10 @@ def _find_json_container_extent(
         if state == "sep":
             if not stack:
                 return i, True, False
+            last_valid_i = i
             i = _skip_ws(text, i)
             if i >= len(text):
-                return None, False, has_content
+                return last_valid_i, False, has_content
             c = text[i]
             closer = "}" if stack[-1] == "{" else "]"
             if c == ",":
@@ -1116,13 +1127,14 @@ def _find_json_container_extent(
             if c == closer:
                 i += 1
                 stack.pop()
+                last_valid_i = i
                 if not stack:
                     return i, True, False
                 state = "sep"
                 continue
-            return None, False, False
+            return (last_valid_i, False, has_content) if has_content else (None, False, False)
 
-    return None, False, has_content
+    return last_valid_i, False, has_content
 
 
 def _scan_json(
@@ -1146,16 +1158,21 @@ def _scan_json(
         else:
             pos = pos_brace if pos_brace != -1 else pos_bracket
 
-        # Avoid redundant duplicate detection if pos is inside an already detected synthetic candidate
-        in_synthetic = False
+        # Avoid redundant duplicate detection inside already detected candidates
+        in_prior_candidate = False
         for c in candidates:
             if c.detection_method == "synthetic_boundary":
                 c_end = c.estimated_end_offset if c.estimated_end_offset is not None else evidence_len
                 if c.offset <= pos < c_end:
-                    in_synthetic = True
+                    in_prior_candidate = True
                     search_from = c_end
                     break
-        if in_synthetic:
+            elif c.format in ("png", "jpeg", "pdf", "xml") and c.estimated_end_offset is not None:
+                if c.offset <= pos < c.estimated_end_offset:
+                    in_prior_candidate = True
+                    search_from = c.estimated_end_offset
+                    break
+        if in_prior_candidate:
             continue
 
         opener = data[pos : pos + 1]
@@ -1229,7 +1246,8 @@ def _scan_json(
                 _INCOMPLETE,
             )
 
-            cls_res, stack, _ = _classify_prefix(text)
+            prefix_text = text[:end_char_index] if end_char_index is not None else text
+            cls_res, stack, _ = _classify_prefix(prefix_text)
             if cls_res in (_CLOSABLE, _INCOMPLETE) and len(stack) > 0:
                 candidates.append(
                     Candidate(
@@ -1243,7 +1261,8 @@ def _scan_json(
                         detection_method="syntax_boundary",
                     )
                 )
-                search_from = pos + len(slice_bytes)
+                prefix_bytes = prefix_text.encode("utf-8")
+                search_from = pos + max(len(prefix_bytes), 1)
                 continue
             else:
                 search_from = pos + 1
@@ -1273,6 +1292,43 @@ def _scan_text_and_csv(
             c_end = c.estimated_end_offset if c.estimated_end_offset is not None else evidence_len
             synthetic_ranges.append((c.offset, c_end))
 
+    # Collect structured candidate boundaries from prior scanner passes (PDF, XML, JSON, PNG, JPEG)
+    def _is_trustworthy_boundary(c: Candidate) -> bool:
+        if c.estimated_end_offset is None:
+            return False
+        if c.format in ("pdf", "xml", "png", "jpeg"):
+            return True
+        if c.format == "json":
+            # An independent JSON candidate acts as a text boundary if it starts at offset 0
+            # or is preceded by a newline/NUL boundary (not embedded within a text line)
+            pos = c.offset
+            if pos == 0 or pos >= evidence_len:
+                return True
+            if data[pos - 1] in (0, 10, 13):
+                return True
+            k = pos - 1
+            while k >= 0 and data[k] in b" \t":
+                k -= 1
+            if k < 0 or data[k] in (0, 10, 13):
+                return True
+            return False
+        return False
+
+    structured_candidates = [
+        c for c in candidates
+        if c.format in ("pdf", "xml", "json", "png", "jpeg")
+    ]
+    trustworthy_structured = [
+        c for c in structured_candidates
+        if _is_trustworthy_boundary(c)
+    ]
+    trustworthy_bounded_ranges = [
+        (c.offset, c.estimated_end_offset)
+        for c in trustworthy_structured
+        if c.estimated_end_offset is not None and c.estimated_end_offset > c.offset
+    ]
+    trustworthy_starts = sorted(set(c.offset for c in trustworthy_structured))
+
     i = 0
     while i < evidence_len:
         # 1. Skip if current position is inside a synthetic candidate range
@@ -1283,6 +1339,21 @@ def _scan_text_and_csv(
                 in_synthetic = True
                 break
         if in_synthetic:
+            continue
+
+        # Skip if current position is inside a validated trustworthy structured candidate range
+        in_structured = False
+        for s_start, s_end in trustworthy_bounded_ranges:
+            if s_start <= i < s_end:
+                i = s_end
+                in_structured = True
+                break
+        if in_structured:
+            continue
+
+        # Skip if current position is the exact start of an unclosed trustworthy structured candidate
+        if any(c.offset == i for c in trustworthy_structured if c.estimated_end_offset is None):
+            i += 1
             continue
 
         # 2. Skip non-text bytes to locate start of potential text run
@@ -1313,16 +1384,24 @@ def _scan_text_and_csv(
         j = i + step
         printable_bytes = step
 
+        # Determine maximum allowable boundary for this text run:
+        # A heuristic text run must not extend past the start of any trustworthy structured candidate ahead of start,
+        # nor into any synthetic candidate range ahead of start.
+        max_run_limit = evidence_len
+        for s_off in trustworthy_starts:
+            if s_off > start:
+                max_run_limit = min(max_run_limit, s_off)
+                break
+        for s_start, _ in synthetic_ranges:
+            if s_start > start:
+                max_run_limit = min(max_run_limit, s_start)
+                break
+
         # 3. Advance j until a run terminator is encountered
         terminated_on_invalid_utf8 = False
         while j < evidence_len:
-            # Check synthetic boundary collision
-            collided_synthetic = False
-            for s_start, s_end in synthetic_ranges:
-                if s_start <= j < s_end:
-                    collided_synthetic = True
-                    break
-            if collided_synthetic:
+            # Check candidate boundary collision (synthetic or structured)
+            if j >= max_run_limit:
                 break
 
             jb = data[j]
